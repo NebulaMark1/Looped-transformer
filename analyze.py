@@ -23,11 +23,20 @@ def load_results(results_dir: str):
         if "config" not in data:
             continue
         cfg = data["config"]
-        key = cfg["mode"]
-        if cfg["mode"] == "lora":
-            key += f"_r{cfg['lora_rank']}"
-        if cfg.get("freeze_base"):
-            key += "_frozen"
+        if "mode" in cfg:
+            key = cfg["mode"]
+            if cfg["mode"] == "lora":
+                key += f"_r{cfg['lora_rank']}"
+            if cfg.get("freeze_base"):
+                key += "_frozen"
+        elif "delta_type" in cfg:
+            key = f"delta_{cfg['delta_type']}"
+            if cfg.get("per_loop_delta"):
+                key += "_perloop"
+            if cfg.get("delta_bottleneck") is not None:
+                key += f"_b{cfg['delta_bottleneck']}"
+        else:
+            continue
         results[key] = data
 
     # Also load oracle results if available
