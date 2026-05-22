@@ -15,8 +15,13 @@ def load_results(results_dir: str):
     """Load all result JSON files from the results directory."""
     results = {}
     for path in glob.glob(os.path.join(results_dir, "*_results.json")):
+        basename = os.path.basename(path)
+        if "oracle_results" in basename or "full_ft_results" in basename:
+            continue  # handled separately below
         with open(path) as f:
             data = json.load(f)
+        if "config" not in data:
+            continue
         cfg = data["config"]
         key = cfg["mode"]
         if cfg["mode"] == "lora":
