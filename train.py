@@ -175,6 +175,8 @@ def parse_args():
     p.add_argument("--output_dir", type=str, default="./results")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--num_workers", type=int, default=0)
+    p.add_argument("--freeze_base", action="store_true",
+                   help="Freeze base weights, only train LoRA adapters (lora mode only)")
     return p.parse_args()
 
 
@@ -208,9 +210,33 @@ def main():
 
     total, embed, trans = print_param_summary(model)
 
+    # Freeze base weights if requested (standard LoRA: only train adapters)
+    if args.freeze_base and args.mode == "lora":
+        trainable_before = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        for name, param in model.named_parameters():
+            param.requires_grad = (".lora_A" in name) or (".lora_B" in name)
+        trainable_after = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(f"  Trainable params: {trainable_before:,} → {trainable_after:,} "
+              f"({trainable_after/trainable_before*100:.1f}%)")
+
     # Optimizer
-    opt_groups = model.configure_optimizer_groups(args.weight_decay, args.lr)
-    optimizer = torch.optim.AdamW(opt_groups, betas=(0.9, 0.95))
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
+    print(f"  Trainable: {sum(p.numel() for p in trainable_params):,} params")
+
+    # Separate weight-decay and no-decay groups
+    decay, no_decay = [], []
+    for name, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+        if p.dim() < 2 or "norm" in name or "embedding" in name:
+            no_decay.append(p)
+        else:
+            decay.append(p)
+
+    optimizer = torch.optim.AdamW([
+        {"params": decay, "weight_decay": args.weight_decay, "lr": args.lr},
+        {"params": no_decay, "weight_decay": 0.0, "lr": args.lr},
+    ], betas=(0.9, 0.95))
     total_steps = len(train_loader) * args.epochs
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optimizer, max_lr=args.lr, total_steps=total_steps,
@@ -241,7 +267,10 @@ def main():
 
         if val_metrics["ppl"] < best_val_ppl:
             best_val_ppl = val_metrics["ppl"]
-            torch.save(model.state_dict(), os.path.join(args.output_dir, f"{args.mode}_best.pt"))
+            ckpt_name = f"{args.mode}_best.pt"
+            if args.freeze_base:
+                ckpt_name = f"{args.mode}_frozen_best.pt"
+            torch.save(model.state_dict(), os.path.join(args.output_dir, ckpt_name))
 
     total_time = time.time() - train_start
 
@@ -257,6 +286,8 @@ def main():
     run_name = f"{args.mode}"
     if args.mode == "lora":
         run_name += f"_r{args.lora_rank}"
+    if args.freeze_base:
+        run_name += "_frozen"
     results_path = os.path.join(args.output_dir, f"{run_name}_results.json")
     with open(results_path, "w") as f:
         json.dump(results, f, indent=2)
