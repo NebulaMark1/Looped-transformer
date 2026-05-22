@@ -93,13 +93,20 @@ def svd_residual(W_base: torch.Tensor, W_full_t: torch.Tensor, rank: int):
 
 # ── Oracle Builder ────────────────────────────────────────────────────────────
 
-def build_oracle(baseline_ckpt: str, full_ckpt: str, rank: int, config_kwargs: dict, verbose: bool = True):
+def build_oracle(baseline_ckpt: str, full_ckpt: str, rank: int, config_kwargs: dict,
+                 shared_A: bool = False, verbose: bool = True):
     """
-    Build oracle LoRA model:
-      - Base weights = baseline (per-loop linear layers)
-      - Per-loop LoRA = SVD of (full[t] - baseline) truncated to `rank`
-      - LN + Embedding = from the fine-tuned full model (keeps compatibility with per-loop weights)
-      - Bias = from the full model (same rationale)
+    Build oracle LoRA model.
+
+    Independent-A (shared_A=False):  W_t = W_base + B_t @ A_t
+        SVD each Δ_t = W_full[t] - W_base independently.
+        Params: num_loops * rank * (in + out) per layer.
+
+    Shared-A (shared_A=True):       W_t = W_base + B_t @ A_shared
+        Stack all Δ_t vertically, SVD the stacked matrix → shared A.
+        Per-loop B_t from the corresponding U-block.
+        Params: rank * in + num_loops * rank * out per layer.
+        Saves (num_loops - 1) * rank * in params vs independent-A.
     """
     from model import LoopedTransformer
 
@@ -119,7 +126,6 @@ def build_oracle(baseline_ckpt: str, full_ckpt: str, rank: int, config_kwargs: d
     baseline_modules = dict(baseline.named_modules())
     full_modules = dict(full.named_modules())
 
-    # ── Per-loop LoRA from SVD residuals ──
     residual_ratios = []
     sv_decay = []
 
@@ -130,32 +136,60 @@ def build_oracle(baseline_ckpt: str, full_ckpt: str, rank: int, config_kwargs: d
         base_mod = baseline_modules[name]
         full_mod = full_modules[name]
 
-        W_base = base_mod.weight.data
-        W_full = full_mod.weight.data  # (num_loops, out, in)
+        W_base = base_mod.weight.data                    # (out, in)
+        W_full = full_mod.weight.data                    # (num_loops, out, in)
+        num_loops = W_full.shape[0]
+        out_dim, in_dim = W_base.shape
 
-        # Use full model's bias (trained with these per-loop weights)
         mod.weight.data.copy_(W_base)
         mod.bias.data.copy_(full_mod.bias.data)
 
         base_norm = W_base.norm().item()
-        for t in range(W_full.shape[0]):
-            delta = W_full[t] - W_base
-            ratio = delta.norm().item() / (base_norm + 1e-8)
+
+        if shared_A:
+            # ── Shared-A SVD ──
+            # Stack all loop residuals: Δ_stacked (num_loops * out, in)
+            deltas = (W_full - W_base.unsqueeze(0)).reshape(num_loops * out_dim, in_dim)
+            ratio = deltas.norm().item() / (base_norm * (num_loops ** 0.5) + 1e-8)
             residual_ratios.append(ratio)
 
-            # SVD and truncate
-            U, S, Vh = torch.linalg.svd(delta.float())
-            if t == 0 and S.numel() > 0:
-                sv_decay.append((S[0].item(), S[:rank].norm().item() / S.norm().item()))
+            U_stacked, S_stacked, Vh = torch.linalg.svd(deltas.float())
+            if sv_decay == [] or name == list(oracle_modules.keys())[0]:
+                sv_decay.append((S_stacked[0].item(),
+                                 S_stacked[:rank].norm().item() / (S_stacked.norm().item() + 1e-8)))
 
-            S_sqrt = torch.diag(torch.sqrt(S[:rank]))
-            B = (U[:, :rank] @ S_sqrt).to(delta.dtype)
-            A = (S_sqrt @ Vh[:rank, :]).to(delta.dtype)
-            mod.lora_A.data[t].copy_(A)
-            mod.lora_B.data[t].copy_(B)
+            S_sqrt = torch.diag(torch.sqrt(S_stacked[:rank]))
+            A_shared = (S_sqrt @ Vh[:rank, :]).to(deltas.dtype)   # (rank, in)
 
-    # ── Copy LN + Embedding from FULL model (not baseline) ──
-    # Per-loop weights evolved with full's LN/embedding; using baseline's creates mismatch.
+            # Set same A for all loops
+            for t in range(num_loops):
+                mod.lora_A.data[t].copy_(A_shared)
+
+            # Extract per-loop B from U blocks
+            for t in range(num_loops):
+                U_t = U_stacked[t * out_dim:(t + 1) * out_dim, :rank]  # (out, rank)
+                B_t = (U_t @ S_sqrt).to(deltas.dtype)                  # (out, rank)
+                mod.lora_B.data[t].copy_(B_t)
+
+        else:
+            # ── Independent-A SVD ──
+            for t in range(num_loops):
+                delta = W_full[t] - W_base
+                ratio = delta.norm().item() / (base_norm + 1e-8)
+                residual_ratios.append(ratio)
+
+                U, S, Vh = torch.linalg.svd(delta.float())
+                if t == 0 and name == list(oracle_modules.keys())[0]:
+                    sv_decay.append((S[0].item(),
+                                     S[:rank].norm().item() / (S.norm().item() + 1e-8)))
+
+                S_sqrt = torch.diag(torch.sqrt(S[:rank]))
+                B = (U[:, :rank] @ S_sqrt).to(delta.dtype)
+                A = (S_sqrt @ Vh[:rank, :]).to(delta.dtype)
+                mod.lora_A.data[t].copy_(A)
+                mod.lora_B.data[t].copy_(B)
+
+    # ── Copy LN + Embedding from FULL model ──
     oracle_params = dict(oracle.named_parameters())
     full_params = dict(full.named_parameters())
     for name in oracle_params:
@@ -164,10 +198,11 @@ def build_oracle(baseline_ckpt: str, full_ckpt: str, rank: int, config_kwargs: d
 
     if verbose:
         mean_ratio = sum(residual_ratios) / len(residual_ratios) if residual_ratios else 0
-        print(f"  Mean ||Δ|| / ||W_base||: {mean_ratio:.6f}")
+        tag = "shared-A" if shared_A else "independent-A"
+        print(f"  [{tag}] Mean ||Δ|| / ||W_base||: {mean_ratio:.6f}")
         if sv_decay:
             top_sv, energy = sv_decay[0]
-            print(f"  First layer top SV: {top_sv:.6f}, top-{rank} energy ratio: {energy:.4f}")
+            print(f"  [{tag}] First layer top SV: {top_sv:.6f}, top-{rank} energy: {energy:.4f}")
 
     return oracle
 
@@ -224,46 +259,71 @@ def main():
     full_ppl = evaluate(full_ref, val_loader, device)
     print(f"Full PPL:    {full_ppl:.2f}")
 
-    # Try different ranks for oracle
-    results = {}
+    # Try different ranks for both independent-A and shared-A oracle
+    results_ind = {}
+    results_shared = {}
+
     for rank in args.ranks:
-        print(f"\nBuilding oracle rank={rank}...")
-        oracle = build_oracle(args.baseline, args.full, rank, config_kwargs)
-        oracle = oracle.to(device)
-        ppl = evaluate(oracle, val_loader, device)
-        results[rank] = ppl
-        print(f"  Oracle r={rank}: PPL={ppl:.2f}")
+        print(f"\nBuilding oracle rank={rank} (independent-A)...")
+        oracle_ind = build_oracle(args.baseline, args.full, rank, config_kwargs, shared_A=False)
+        oracle_ind = oracle_ind.to(device)
+        ppl_ind = evaluate(oracle_ind, val_loader, device)
+        results_ind[rank] = ppl_ind
+        print(f"  Oracle r={rank} independent-A: PPL={ppl_ind:.2f}")
 
-        # Save best oracle
+        print(f"Building oracle rank={rank} (shared-A)...")
+        oracle_shared = build_oracle(args.baseline, args.full, rank, config_kwargs, shared_A=True)
+        oracle_shared = oracle_shared.to(device)
+        ppl_shared = evaluate(oracle_shared, val_loader, device)
+        results_shared[rank] = ppl_shared
+        print(f"  Oracle r={rank} shared-A: PPL={ppl_shared:.2f}")
+
+        # Save best
         if rank == max(args.ranks):
-            torch.save(oracle.state_dict(), os.path.join(args.output_dir, f"oracle_r{rank}_best.pt"))
+            torch.save(oracle_ind.state_dict(), os.path.join(args.output_dir, f"oracle_r{rank}_best.pt"))
+            torch.save(oracle_shared.state_dict(), os.path.join(args.output_dir, f"oracle_shared_r{rank}_best.pt"))
 
-    # Load trained LoRA result if available
-    trained_ppl = None
-    lora_results_path = os.path.join(args.trained_results, "lora_r8_results.json")
-    if os.path.exists(lora_results_path):
-        with open(lora_results_path) as f:
-            data = json.load(f)
-        trained_ppl = data["best_val_ppl"]
+    # Load trained LoRA results
+    trained_ppl = {}
+    for fname in ["lora_r8_results.json", "lora_r16_frozen_results.json", "lora_r8_frozen_results.json"]:
+        path = os.path.join(args.trained_results, fname)
+        if os.path.exists(path):
+            with open(path) as f:
+                d = json.load(f)
+            key = fname.replace("_results.json", "")
+            trained_ppl[key] = d["best_val_ppl"]
 
     # ── Print summary ──
-    print("\n" + "=" * 72)
-    print("  Oracle LoRA Analysis — SVD Residual Decomposition")
-    print("=" * 72)
+    print("\n" + "=" * 80)
+    print("  Oracle LoRA Analysis — Independent-A vs Shared-A")
+    print("=" * 80)
     print(f"  Baseline PPL:              {baseline_ppl:.2f}")
     print(f"  Full (upper bound) PPL:    {full_ppl:.2f}")
-    if trained_ppl:
-        print(f"  Trained LoRA r=8 PPL:      {trained_ppl:.2f}")
+    for key, ppl in sorted(trained_ppl.items()):
+        print(f"  Trained {key:<30} {ppl:.2f}")
     print()
 
-    print(f"  {'Rank':<8} {'Oracle PPL':<14} {'Δ vs Baseline':<16} {'Recovery %':<14}")
-    print(f"  {'-'*52}")
     full_gain = baseline_ppl - full_ppl
+
+    # Independent-A table
+    print(f"  ── Independent A (B_t @ A_t, {args.num_loops}*r*(in+out) params/layer) ──")
+    print(f"  {'Rank':<8} {'Oracle PPL':<14} {'Δ vs Baseline':<18} {'Recovery %':<14}")
+    print(f"  {'-'*56}")
     for rank in args.ranks:
-        oracle_ppl = results[rank]
-        delta = baseline_ppl - oracle_ppl
+        ppl = results_ind[rank]
+        delta = baseline_ppl - ppl
         recovery = (delta / full_gain * 100) if full_gain > 0 else 0.0
-        print(f"  {rank:<8} {oracle_ppl:<14.2f} {delta:+.2f} ({delta/baseline_ppl*100:+.2f}%)   {recovery:.1f}%")
+        print(f"  {rank:<8} {ppl:<14.2f} {delta:+.2f} ({delta/baseline_ppl*100:+.2f}%)     {recovery:.1f}%")
+
+    # Shared-A table
+    print(f"\n  ── Shared A (B_t @ A_shared, r*in + {args.num_loops}*r*out params/layer) ──")
+    print(f"  {'Rank':<8} {'Oracle PPL':<14} {'Δ vs Baseline':<18} {'Recovery %':<14}")
+    print(f"  {'-'*56}")
+    for rank in args.ranks:
+        ppl = results_shared[rank]
+        delta = baseline_ppl - ppl
+        recovery = (delta / full_gain * 100) if full_gain > 0 else 0.0
+        print(f"  {rank:<8} {ppl:<14.2f} {delta:+.2f} ({delta/baseline_ppl*100:+.2f}%)     {recovery:.1f}%")
 
     print()
     print(f"  Full gain over baseline: {full_gain:.2f} PPL points ({full_gain/baseline_ppl*100:.1f}%)")
@@ -273,8 +333,9 @@ def main():
     out = {
         "baseline_ppl": baseline_ppl,
         "full_ppl": full_ppl,
-        "trained_lora_ppl": trained_ppl,
-        "oracle_results": {str(r): ppl for r, ppl in results.items()},
+        "trained_ppl": trained_ppl,
+        "oracle_independent": {str(r): ppl for r, ppl in results_ind.items()},
+        "oracle_shared": {str(r): ppl for r, ppl in results_shared.items()},
         "full_gain": full_gain,
     }
     os.makedirs(args.output_dir, exist_ok=True)

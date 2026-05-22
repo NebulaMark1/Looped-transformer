@@ -119,16 +119,32 @@ def print_oracle(oracle_data: dict | None, baseline_ppl: float | None):
     print("=" * 72)
     print(f"  Baseline PPL:              {d['baseline_ppl']:.2f}")
     print(f"  Full (upper bound) PPL:    {d.get('full_ppl', 0):.2f}")
-    if d.get("trained_lora_ppl"):
+    if d.get("trained_ppl"):
+        for key, ppl in sorted(d["trained_ppl"].items()):
+            print(f"  Trained {key:<30} {ppl:.2f}")
+    elif d.get("trained_lora_ppl"):
         print(f"  Trained LoRA r=8 PPL:      {d['trained_lora_ppl']:.2f}")
-    print(f"\n  {'Rank':<8} {'Oracle PPL':<14} {'Recovery %':<14}")
-    print(f"  {'-'*38}")
+
     full_gain = d.get("full_gain", 0)
-    for rank_str, ppl in sorted(d["oracle_results"].items(), key=lambda x: int(x[0])):
-        rank = int(rank_str)
-        delta = d["baseline_ppl"] - ppl
-        recovery = (delta / full_gain * 100) if full_gain > 0 else 0
-        print(f"  {rank:<8} {ppl:<14.2f} {recovery:.1f}%")
+
+    # Support both old format (oracle_results) and new (oracle_independent + oracle_shared)
+    datasets = []
+    if "oracle_independent" in d:
+        datasets.append(("Independent-A (B_t @ A_t)", d["oracle_independent"]))
+    if "oracle_shared" in d:
+        datasets.append(("Shared-A (B_t @ A_shared)", d["oracle_shared"]))
+    if not datasets and "oracle_results" in d:
+        datasets.append(("Oracle", d["oracle_results"]))
+
+    for label, oracle_dict in datasets:
+        print(f"\n  ── {label} ──")
+        print(f"  {'Rank':<8} {'Oracle PPL':<14} {'Recovery %':<14}")
+        print(f"  {'-'*38}")
+        for rank_str, ppl in sorted(oracle_dict.items(), key=lambda x: int(x[0])):
+            rank = int(rank_str)
+            delta = d["baseline_ppl"] - ppl
+            recovery = (delta / full_gain * 100) if full_gain > 0 else 0
+            print(f"  {rank:<8} {ppl:<14.2f} {recovery:.1f}%")
 
 
 def main():
