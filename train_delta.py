@@ -106,6 +106,12 @@ def parse_args():
     p.add_argument("--delta_type", type=str, default="ffn", choices=["ffn", "attn_ffn"])
     p.add_argument("--delta_bottleneck", type=int, default=None)
     p.add_argument("--per_loop_delta", action="store_true")
+    p.add_argument("--attn_inject_every", type=int, default=0,
+                   help="Inject attention every N delta steps (0=never, 2=every 2nd step)")
+    p.add_argument("--baseline_ckpt", type=str, default=None,
+                   help="Path to trained baseline checkpoint to init full_blocks")
+    p.add_argument("--freeze_full_block", action="store_true",
+                   help="Freeze full_block params, only train delta")
     p.add_argument("--embed_dim", type=int, default=384)
     p.add_argument("--num_heads", type=int, default=6)
     p.add_argument("--num_layers", type=int, default=3)
@@ -141,6 +147,7 @@ def main():
         delta_type=args.delta_type,
         delta_bottleneck=args.delta_bottleneck,
         per_loop_delta=args.per_loop_delta,
+        attn_inject_every=args.attn_inject_every,
         embed_dim=args.embed_dim,
         num_heads=args.num_heads,
         num_layers=args.num_layers,
@@ -150,6 +157,18 @@ def main():
         max_seq_len=args.seq_len,
     )
     model = DeltaLoopedTransformer(config).to(device)
+
+    # Init full_blocks from trained baseline to skip heavy attention training
+    if args.baseline_ckpt:
+        from delta_model import load_full_blocks_from_baseline
+        load_full_blocks_from_baseline(model, args.baseline_ckpt)
+
+    if args.freeze_full_block:
+        for name, p in model.named_parameters():
+            if name.startswith("full_blocks."):
+                p.requires_grad = False
+        trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(f"  Frozen full_blocks, trainable: {trainable:,} params")
 
     total, embed, trans = model.count_params()
     full_params = sum(sum(p.numel() for p in b.parameters()) for b in model.full_blocks)
@@ -184,6 +203,12 @@ def main():
         run_name += f"_b{args.delta_bottleneck}"
     if args.num_loops != 4:
         run_name += f"_loop{args.num_loops}"
+    if args.attn_inject_every > 0:
+        run_name += f"_inj{args.attn_inject_every}"
+    if args.baseline_ckpt:
+        run_name += "_frombaseline"
+    if args.freeze_full_block:
+        run_name += "_freezefull"
 
     # Training
     metrics_history = []

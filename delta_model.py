@@ -29,6 +29,7 @@ class DeltaConfig:
     delta_type: str = "ffn"        # "ffn" | "attn_ffn"
     delta_bottleneck: int | None = None  # None → embed_dim // 4
     per_loop_delta: bool = False   # separate delta block per loop?
+    attn_inject_every: int = 0     # 0=never, 2=attention injection every 2nd delta step
     tie_embedding: bool = True
 
 
@@ -86,10 +87,13 @@ class DeltaBlock(nn.Module):
         bottleneck = config.delta_bottleneck or (dim // 4)
         self.delta_type = config.delta_type
         self.per_loop = config.per_loop_delta
+        self.attn_inject_every = config.attn_inject_every
         n = config.num_loops - 1  # number of delta loops
         self.n_delta = n
 
-        if self.delta_type == "attn_ffn":
+        # Build attention if delta_type always uses it, OR if injection is enabled
+        self.has_attn = (self.delta_type == "attn_ffn") or (self.attn_inject_every > 0)
+        if self.has_attn:
             delta_heads = max(1, config.num_heads // 2)
             head_dim = dim // delta_heads
             self.attn_q = self._make_param(n, dim, dim)
@@ -137,21 +141,31 @@ class DeltaBlock(nn.Module):
             elif p.dim() == 1:
                 nn.init.zeros_(p)
 
+    def _apply_attn(self, x: torch.Tensor, delta_idx: int) -> torch.Tensor:
+        B, T, D = x.shape
+        h = self._get_ln(self.ln_attn, delta_idx)(x)
+        nh = self.num_delta_heads
+        hd = self.delta_head_dim
+        q = F.linear(h, self._get_param(self.attn_q, delta_idx)).view(B, T, nh, hd).transpose(1, 2)
+        k = F.linear(h, self._get_param(self.attn_k, delta_idx)).view(B, T, nh, hd).transpose(1, 2)
+        v = F.linear(h, self._get_param(self.attn_v, delta_idx)).view(B, T, nh, hd).transpose(1, 2)
+        attn_out = F.scaled_dot_product_attention(q, k, v, is_causal=True,
+                                                  dropout_p=self.dropout.p if self.training else 0.0)
+        attn_out = attn_out.transpose(1, 2).contiguous().view(B, T, D)
+        return self.dropout(F.linear(attn_out, self._get_param(self.attn_o, delta_idx)))
+
+    def _should_apply_attn(self, delta_idx: int) -> bool:
+        if self.delta_type == "attn_ffn":
+            return True  # always
+        if self.attn_inject_every > 0:
+            return (delta_idx + 1) % self.attn_inject_every == 0
+        return False
+
     def forward(self, x: torch.Tensor, delta_idx: int) -> torch.Tensor:
         delta = torch.zeros_like(x)
 
-        if self.delta_type == "attn_ffn":
-            B, T, D = x.shape
-            h = self._get_ln(self.ln_attn, delta_idx)(x)
-            nh = self.num_delta_heads
-            hd = self.delta_head_dim
-            q = F.linear(h, self._get_param(self.attn_q, delta_idx)).view(B, T, nh, hd).transpose(1, 2)
-            k = F.linear(h, self._get_param(self.attn_k, delta_idx)).view(B, T, nh, hd).transpose(1, 2)
-            v = F.linear(h, self._get_param(self.attn_v, delta_idx)).view(B, T, nh, hd).transpose(1, 2)
-            attn_out = F.scaled_dot_product_attention(q, k, v, is_causal=True,
-                                                      dropout_p=self.dropout.p if self.training else 0.0)
-            attn_out = attn_out.transpose(1, 2).contiguous().view(B, T, D)
-            delta = delta + self.dropout(F.linear(attn_out, self._get_param(self.attn_o, delta_idx)))
+        if self.has_attn and self._should_apply_attn(delta_idx):
+            delta = delta + self._apply_attn(x, delta_idx)
 
         # FFN delta (always present)
         h = self._get_ln(self.ln_ffn, delta_idx)(x)
@@ -165,6 +179,29 @@ class DeltaBlock(nn.Module):
 
     def count_params(self):
         return sum(p.numel() for p in self.parameters())
+
+
+# ── Baseline init ─────────────────────────────────────────────────────────────
+
+def load_full_blocks_from_baseline(model: "DeltaLoopedTransformer", baseline_ckpt: str):
+    """
+    Initialize FullBlocks from a trained baseline checkpoint.
+    Baseline block params (e.g. blocks.0.q_proj.weight) map to
+    full_blocks.0.q_proj.weight.
+    """
+    baseline_state = torch.load(baseline_ckpt, map_location="cpu")
+
+    # Remap keys: blocks.N.xxx → full_blocks.N.xxx
+    remapped = {}
+    for key, val in baseline_state.items():
+        if key.startswith("blocks."):
+            remapped["full_" + key] = val
+        elif key.startswith("token_embedding.") or key.startswith("position_embedding.") or key.startswith("ln_final."):
+            remapped[key] = val
+
+    missing, unexpected = model.load_state_dict(remapped, strict=False)
+    print(f"  Loaded {len(remapped)} params from baseline, "
+          f"skipped {len(missing)} delta-only params")
 
 
 # ── Full model ────────────────────────────────────────────────────────────────
@@ -229,16 +266,21 @@ class DeltaLoopedTransformer(nn.Module):
 # ── Quick test ────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    for dt in ["ffn", "attn_ffn"]:
-        for pl in [False, True]:
-            cfg = DeltaConfig(delta_type=dt, per_loop_delta=pl, embed_dim=384, num_layers=3, num_loops=4, num_heads=6)
-            model = DeltaLoopedTransformer(cfg)
-            total, embed, trans = model.count_params()
-            full_block = sum(sum(p.numel() for p in b.parameters()) for b in model.full_blocks)
-            delta_block = sum(b.count_params() for b in model.delta_blocks)
-            print(f"delta={dt}, per_loop={pl}: total={total:,}, trans={trans:,}, "
-                  f"full={full_block:,}, delta={delta_block:,}")
-
-            x = torch.randint(0, 50257, (2, 64))
-            out = model(x, labels=x)
-            print(f"  loss={out['loss'].item():.4f}")
+    tests = [
+        ("ffn", False, 0),
+        ("ffn", False, 2),
+        ("attn_ffn", False, 0),
+        ("ffn", True, 3),
+    ]
+    for dt, pl, inj in tests:
+        cfg = DeltaConfig(delta_type=dt, per_loop_delta=pl, attn_inject_every=inj,
+                          embed_dim=384, num_layers=3, num_loops=4, num_heads=6)
+        model = DeltaLoopedTransformer(cfg)
+        total, embed, trans = model.count_params()
+        full_block = sum(sum(p.numel() for p in b.parameters()) for b in model.full_blocks)
+        delta_block = sum(b.count_params() for b in model.delta_blocks)
+        print(f"{dt}, per_loop={pl}, inject_every={inj}: "
+              f"total={total:,}, trans={trans:,}, full={full_block:,}, delta={delta_block:,}")
+        x = torch.randint(0, 50257, (2, 64))
+        out = model(x, labels=x)
+        print(f"  loss={out['loss'].item():.4f}")
