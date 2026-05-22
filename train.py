@@ -250,6 +250,15 @@ def main():
         {"params": no_decay, "weight_decay": 0.0, "lr": args.lr},
     ], betas=(0.9, 0.95))
     total_steps = len(train_loader) * args.epochs
+    run_name = f"{args.mode}"
+    if args.mode == "lora":
+        run_name += f"_r{args.lora_rank}"
+    if args.freeze_base:
+        run_name += "_frozen"
+    if args.embed_dim != 384:
+        run_name += f"_d{args.embed_dim}"
+    if args.num_layers != 3:
+        run_name += f"_L{args.num_layers}"
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optimizer, max_lr=args.lr, total_steps=total_steps,
         pct_start=args.warmup_steps / total_steps,
@@ -279,9 +288,7 @@ def main():
 
         if val_metrics["ppl"] < best_val_ppl:
             best_val_ppl = val_metrics["ppl"]
-            ckpt_name = f"{args.mode}_best.pt"
-            if args.freeze_base:
-                ckpt_name = f"{args.mode}_frozen_best.pt"
+            ckpt_name = run_name + "_best.pt"
             torch.save(model.state_dict(), os.path.join(args.output_dir, ckpt_name))
 
     total_time = time.time() - train_start
@@ -295,11 +302,6 @@ def main():
         "metrics": metrics_history,
     }
 
-    run_name = f"{args.mode}"
-    if args.mode == "lora":
-        run_name += f"_r{args.lora_rank}"
-    if args.freeze_base:
-        run_name += "_frozen"
     results_path = os.path.join(args.output_dir, f"{run_name}_results.json")
     with open(results_path, "w") as f:
         json.dump(results, f, indent=2)
