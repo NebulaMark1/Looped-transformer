@@ -56,7 +56,7 @@ def print_comparison(results: dict, oracle_data: dict | None = None):
             break
 
     for key in sorted(results.keys()):
-        r = train_results[key]
+        r = results[key]
         p = r.get("param_counts", {})
         ppl = r["best_val_ppl"]
         train_time = r.get("total_train_time", 0)
@@ -72,7 +72,7 @@ def print_comparison(results: dict, oracle_data: dict | None = None):
     for key in sorted(results.keys()):
         if key.startswith("baseline"):
             continue
-        r = train_results[key]
+        r = results[key]
         p = r.get("param_counts", {})
         ppl = r["best_val_ppl"]
         if baseline_ppl and results.get("baseline"):
@@ -86,7 +86,7 @@ def print_comparison(results: dict, oracle_data: dict | None = None):
     print("Best Epoch Summary:")
     print("-" * 50)
     for key in sorted(results.keys()):
-        r = train_results[key]
+        r = results[key]
         best = min(r["metrics"], key=lambda x: x["val_ppl"])
         print(f"  {key}: epoch {best['epoch']}, val_ppl={best['val_ppl']:.2f}, train_ppl={best['train_ppl']:.2f}")
 
