@@ -35,6 +35,12 @@ def load_results(results_dir: str):
                 key += "_perloop"
             if cfg.get("delta_bottleneck") is not None:
                 key += f"_b{cfg['delta_bottleneck']}"
+            if cfg.get("attn_inject_every", 0) > 0:
+                key += f"_inj{cfg['attn_inject_every']}"
+            if cfg.get("baseline_ckpt"):
+                key += "_frombl"
+            if cfg.get("freeze_full_block"):
+                key += "_frz"
         else:
             continue
         if cfg.get("num_loops", 4) != 4:
