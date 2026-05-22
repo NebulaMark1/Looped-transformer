@@ -177,6 +177,8 @@ def parse_args():
     p.add_argument("--num_workers", type=int, default=0)
     p.add_argument("--freeze_base", action="store_true",
                    help="Freeze base weights, only train LoRA adapters (lora mode only)")
+    p.add_argument("--baseline_ckpt", type=str, default="results/baseline_best.pt",
+                   help="Path to trained baseline checkpoint (required when --freeze_base)")
     return p.parse_args()
 
 
@@ -212,6 +214,16 @@ def main():
 
     # Freeze base weights if requested (standard LoRA: only train adapters)
     if args.freeze_base and args.mode == "lora":
+        # Load trained baseline weights as W_base (critical: can't freeze random init)
+        print(f"Loading baseline weights from {args.baseline_ckpt}...")
+        baseline_state = torch.load(args.baseline_ckpt, map_location=device)
+        # baseline has mode='baseline' → no lora_A/lora_B keys
+        # lora model has extra lora_A/lora_B keys, we only load matching keys
+        missing, unexpected = model.load_state_dict(baseline_state, strict=False)
+        # Verify embedding and LN loaded
+        loaded = set(baseline_state.keys()) - set(unexpected)
+        print(f"  Loaded {len(loaded)} params from baseline, skipped {len(missing)} lora-only params")
+
         trainable_before = sum(p.numel() for p in model.parameters() if p.requires_grad)
         for name, param in model.named_parameters():
             param.requires_grad = (".lora_A" in name) or (".lora_B" in name)
