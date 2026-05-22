@@ -14,6 +14,8 @@ def parse_args():
     p.add_argument("--max_tokens", type=int, default=50)
     p.add_argument("--temperature", type=float, default=0.8)
     p.add_argument("--top_k", type=int, default=40)
+    p.add_argument("--seq_len", type=int, default=256)
+    p.add_argument("--num_loops", type=int, default=4)
     return p.parse_args()
 
 
@@ -61,11 +63,13 @@ def main():
 
     if args.model_type == "delta":
         from delta_model import DeltaConfig, DeltaLoopedTransformer
-        cfg = DeltaConfig()
+        cfg = DeltaConfig(max_seq_len=args.seq_len, num_loops=args.num_loops,
+                          embed_dim=384, num_heads=6, num_layers=3)
         model = DeltaLoopedTransformer(cfg).to(device)
     else:
         from model import create_model
-        model = create_model(args.model_type).to(device)
+        model = create_model(args.model_type, max_seq_len=args.seq_len,
+                             num_loops=args.num_loops).to(device)
 
     model.load_state_dict(torch.load(args.checkpoint, map_location=device))
     model.eval()
