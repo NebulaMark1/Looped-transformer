@@ -37,6 +37,8 @@ def load_results(results_dir: str):
                 key += f"_b{cfg['delta_bottleneck']}"
         else:
             continue
+        if cfg.get("num_loops", 4) != 4:
+            key += f"_L{cfg['num_loops']}"
         results[key] = data
 
     # Also load oracle results if available

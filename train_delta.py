@@ -182,6 +182,8 @@ def main():
         run_name += "_perloop"
     if args.delta_bottleneck is not None:
         run_name += f"_b{args.delta_bottleneck}"
+    if args.num_loops != 4:
+        run_name += f"_loop{args.num_loops}"
 
     # Training
     metrics_history = []

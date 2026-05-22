@@ -259,6 +259,8 @@ def main():
         run_name += f"_d{args.embed_dim}"
     if args.num_layers != 3:
         run_name += f"_L{args.num_layers}"
+    if args.num_loops != 4:
+        run_name += f"_loop{args.num_loops}"
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optimizer, max_lr=args.lr, total_steps=total_steps,
         pct_start=args.warmup_steps / total_steps,
