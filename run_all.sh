@@ -5,7 +5,7 @@
 set -e
 
 RESULTS_DIR="./results"
-EPOCHS=5
+EPOCHS=15
 
 echo "============================================"
 echo "  Looped Transformer Experiment Suite"
@@ -20,8 +20,8 @@ echo "[1/3] Training baseline (traditional looped)..."
 python train.py --mode baseline --epochs $EPOCHS --output_dir $RESULTS_DIR
 
 echo ""
-echo "[2/3] Training LoRA-per-Loop (r=16)..."
-python train.py --mode lora --lora_rank 16 --epochs $EPOCHS --output_dir $RESULTS_DIR
+echo "[2/3] Training LoRA-per-Loop (r=8)..."
+python train.py --mode lora --lora_rank 8 --epochs $EPOCHS --output_dir $RESULTS_DIR
 
 echo ""
 echo "[3/3] Training Full-Loop (independent params per loop)..."

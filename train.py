@@ -157,20 +157,20 @@ def parse_args():
     p.add_argument("--mode", type=str, default="baseline",
                    choices=["baseline", "lora", "full"],
                    help="Model mode")
-    p.add_argument("--lora_rank", type=int, default=16,
+    p.add_argument("--lora_rank", type=int, default=8,
                    help="LoRA rank (only for lora mode)")
-    p.add_argument("--embed_dim", type=int, default=256)
-    p.add_argument("--num_heads", type=int, default=4)
-    p.add_argument("--num_layers", type=int, default=2)
+    p.add_argument("--embed_dim", type=int, default=384)
+    p.add_argument("--num_heads", type=int, default=6)
+    p.add_argument("--num_layers", type=int, default=3)
     p.add_argument("--num_loops", type=int, default=4)
     p.add_argument("--ff_mult", type=int, default=4)
     p.add_argument("--dropout", type=float, default=0.1)
-    p.add_argument("--seq_len", type=int, default=128)
+    p.add_argument("--seq_len", type=int, default=256)
     p.add_argument("--batch_size", type=int, default=16)
-    p.add_argument("--epochs", type=int, default=5)
+    p.add_argument("--epochs", type=int, default=15)
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--weight_decay", type=float, default=0.1)
-    p.add_argument("--warmup_steps", type=int, default=500)
+    p.add_argument("--warmup_steps", type=int, default=1000)
     p.add_argument("--device", type=str, default="cuda")
     p.add_argument("--output_dir", type=str, default="./results")
     p.add_argument("--seed", type=int, default=42)

@@ -28,13 +28,13 @@ bash run_all.sh
 
 ```bash
 # Baseline
-python train.py --mode baseline --epochs 5 --output_dir ./results
+python train.py --mode baseline --epochs 15 --output_dir ./results
 
 # LoRA-per-Loop
-python train.py --mode lora --lora_rank 16 --epochs 5 --output_dir ./results
+python train.py --mode lora --lora_rank 8 --epochs 15 --output_dir ./results
 
 # Full-Loop (独立参数)
-python train.py --mode full --epochs 5 --output_dir ./results
+python train.py --mode full --epochs 15 --output_dir ./results
 ```
 
 ### 关键参数
@@ -42,14 +42,14 @@ python train.py --mode full --epochs 5 --output_dir ./results
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | `--mode` | baseline | baseline / lora / full |
-| `--lora_rank` | 16 | LoRA秩 |
-| `--embed_dim` | 256 | 嵌入维度 |
-| `--num_layers` | 2 | Transformer块数 |
+| `--lora_rank` | 8 | LoRA秩 |
+| `--embed_dim` | 384 | 嵌入维度 |
+| `--num_layers` | 3 | Transformer块数 |
 | `--num_loops` | 4 | 每块的循环次数 |
-| `--num_heads` | 4 | 注意力头数 |
-| `--epochs` | 5 | 训练轮数 |
+| `--num_heads` | 6 | 注意力头数 |
+| `--epochs` | 15 | 训练轮数 |
 | `--batch_size` | 16 | 批次大小 |
-| `--seq_len` | 128 | 序列长度 |
+| `--seq_len` | 256 | 序列长度 |
 | `--lr` | 3e-4 | 学习率 |
 | `--device` | cuda | 设备（自动fallback到CPU） |
 
@@ -68,7 +68,7 @@ python analyze.py --results_dir ./results --detail
 ```
 results/
 ├── baseline_results.json    # Baseline 训练指标
-├── lora_r16_results.json    # LoRA-per-Loop 训练指标
+├── lora_r8_results.json     # LoRA-per-Loop 训练指标
 ├── full_results.json        # Full-Loop 训练指标
 ├── baseline_best.pt         # 最佳模型权重
 ├── lora_best.pt
@@ -89,6 +89,7 @@ Input
   → Token Embedding + Position Embedding
   → [Block 1 × num_loops 次]   ← 每轮可注入独立LoRA
   → [Block 2 × num_loops 次]
+  → [Block 3 × num_loops 次]
   → LayerNorm → LM Head
   → Loss (cross-entropy)
 ```
