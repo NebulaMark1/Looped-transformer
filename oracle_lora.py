@@ -93,11 +93,13 @@ def svd_residual(W_base: torch.Tensor, W_full_t: torch.Tensor, rank: int):
 
 # ── Oracle Builder ────────────────────────────────────────────────────────────
 
-def build_oracle(baseline_ckpt: str, full_ckpt: str, rank: int, config_kwargs: dict):
+def build_oracle(baseline_ckpt: str, full_ckpt: str, rank: int, config_kwargs: dict, verbose: bool = True):
     """
     Build oracle LoRA model:
-      - Base weights = baseline
+      - Base weights = baseline (per-loop linear layers)
       - Per-loop LoRA = SVD of (full[t] - baseline) truncated to `rank`
+      - LN + Embedding = from the fine-tuned full model (keeps compatibility with per-loop weights)
+      - Bias = from the full model (same rationale)
     """
     from model import LoopedTransformer
 
@@ -105,7 +107,6 @@ def build_oracle(baseline_ckpt: str, full_ckpt: str, rank: int, config_kwargs: d
     full_cfg = LoopedTransformerConfig(mode="full", **config_kwargs)
     lora_cfg = LoopedTransformerConfig(mode="lora", lora_rank=rank, **config_kwargs)
 
-    # Load trained models
     baseline = LoopedTransformer(baseline_cfg)
     baseline.load_state_dict(torch.load(baseline_ckpt, map_location="cpu"))
 
@@ -114,10 +115,13 @@ def build_oracle(baseline_ckpt: str, full_ckpt: str, rank: int, config_kwargs: d
 
     oracle = LoopedTransformer(lora_cfg)
 
-    # Iterate through LoRALinear modules
     oracle_modules = dict(oracle.named_modules())
     baseline_modules = dict(baseline.named_modules())
     full_modules = dict(full.named_modules())
+
+    # ── Per-loop LoRA from SVD residuals ──
+    residual_ratios = []
+    sv_decay = []
 
     for name, mod in oracle_modules.items():
         if mod.__class__.__name__ != "LoRALinear":
@@ -126,24 +130,44 @@ def build_oracle(baseline_ckpt: str, full_ckpt: str, rank: int, config_kwargs: d
         base_mod = baseline_modules[name]
         full_mod = full_modules[name]
 
-        # Copy base weight and bias from baseline
-        mod.weight.data.copy_(base_mod.weight.data)
-        mod.bias.data.copy_(base_mod.bias.data)
-
         W_base = base_mod.weight.data
         W_full = full_mod.weight.data  # (num_loops, out, in)
 
+        # Use full model's bias (trained with these per-loop weights)
+        mod.weight.data.copy_(W_base)
+        mod.bias.data.copy_(full_mod.bias.data)
+
+        base_norm = W_base.norm().item()
         for t in range(W_full.shape[0]):
-            B, A = svd_residual(W_base, W_full[t], rank)
+            delta = W_full[t] - W_base
+            ratio = delta.norm().item() / (base_norm + 1e-8)
+            residual_ratios.append(ratio)
+
+            # SVD and truncate
+            U, S, Vh = torch.linalg.svd(delta.float())
+            if t == 0 and S.numel() > 0:
+                sv_decay.append((S[0].item(), S[:rank].norm().item() / S.norm().item()))
+
+            S_sqrt = torch.diag(torch.sqrt(S[:rank]))
+            B = (U[:, :rank] @ S_sqrt).to(delta.dtype)
+            A = (S_sqrt @ Vh[:rank, :]).to(delta.dtype)
             mod.lora_A.data[t].copy_(A)
             mod.lora_B.data[t].copy_(B)
 
-    # Copy remaining non-LoRA params (embeddings, LNs) from baseline
+    # ── Copy LN + Embedding from FULL model (not baseline) ──
+    # Per-loop weights evolved with full's LN/embedding; using baseline's creates mismatch.
     oracle_params = dict(oracle.named_parameters())
-    baseline_params = dict(baseline.named_parameters())
+    full_params = dict(full.named_parameters())
     for name in oracle_params:
-        if name in baseline_params and oracle_params[name].shape == baseline_params[name].shape:
-            oracle_params[name].data.copy_(baseline_params[name].data)
+        if name in full_params and oracle_params[name].shape == full_params[name].shape:
+            oracle_params[name].data.copy_(full_params[name].data)
+
+    if verbose:
+        mean_ratio = sum(residual_ratios) / len(residual_ratios) if residual_ratios else 0
+        print(f"  Mean ||Δ|| / ||W_base||: {mean_ratio:.6f}")
+        if sv_decay:
+            top_sv, energy = sv_decay[0]
+            print(f"  First layer top SV: {top_sv:.6f}, top-{rank} energy ratio: {energy:.4f}")
 
     return oracle
 
