@@ -41,26 +41,14 @@ def auto_detect(state_dict, ckpt_path):
                 layer_indices.add(int(m.group(1)))
     num_layers = max(layer_indices) + 1 if layer_indices else 3
 
-    # -- num_heads from q_proj weight --
-    if model_type == "delta":
-        q_key = "full_blocks.0.q_proj.weight"
-        q_weight = state_dict[q_key]
-        # embed_dim must be divisible by num_heads. Try common values.
-        possible_heads = {4, 5, 6, 7, 8, 10, 12}
-        num_heads = 6
-        for h in sorted(possible_heads, reverse=True):
-            if embed_dim % h == 0:
-                num_heads = h
-                break
+    # -- num_heads: prefer head_dim ≈ 64 (standard practice) --
+    possible_heads = [h for h in [4, 5, 6, 7, 8, 9, 10, 12, 14, 16]
+                      if embed_dim % h == 0]
+    if possible_heads:
+        # Pick the head_dim closest to 64
+        num_heads = min(possible_heads, key=lambda h: abs(embed_dim // h - 64))
     else:
-        q_key = "blocks.0.q_proj.weight"
-        q_weight = state_dict[q_key]
         num_heads = 6
-        possible_heads = {4, 5, 6, 7, 8, 9, 10, 12}
-        for h in sorted(possible_heads, reverse=True):
-            if embed_dim % h == 0:
-                num_heads = h
-                break
 
     # -- num_loops: from filename first, then infer --
     num_loops = 4
