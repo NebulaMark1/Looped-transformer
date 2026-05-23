@@ -29,7 +29,7 @@ class WikiTextDataset(IterableDataset):
 
     def __init__(self, split: str, seq_len: int, tokenizer):
         self.seq_len = seq_len
-        dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split=split)
+        dataset = load_dataset("wikitext", dataset_name, split=split)
         self.data = dataset
 
         # Pre-tokenize all texts, filter empty lines
@@ -72,7 +72,7 @@ def collate_batch(batch):
     }
 
 
-def create_dataloaders(seq_len: int, batch_size: int, num_workers: int = 0):
+def create_dataloaders(seq_len: int, batch_size: int, num_workers: int = 0, dataset_name: str = "wikitext-2-raw-v1"):
     tokenizer = GPT2TokenizerFast.from_pretrained("gpt2")
     tokenizer.pad_token = tokenizer.eos_token
 
@@ -179,6 +179,8 @@ def parse_args():
                    help="Freeze base weights, only train LoRA adapters (lora mode only)")
     p.add_argument("--baseline_ckpt", type=str, default="results/baseline_best.pt",
                    help="Path to trained baseline checkpoint (required when --freeze_base)")
+    p.add_argument("--dataset", type=str, default="wikitext-2-raw-v1",
+                   help="wikitext-2-raw-v1 or wikitext-103-raw-v1")
     return p.parse_args()
 
 
@@ -194,7 +196,7 @@ def main():
     # Data
     print("Loading data...")
     train_loader, val_loader, tokenizer = create_dataloaders(
-        args.seq_len, args.batch_size, args.num_workers,
+        args.seq_len, args.batch_size, args.num_workers, args.dataset,
     )
 
     # Model
@@ -261,6 +263,8 @@ def main():
         run_name += f"_L{args.num_layers}"
     if args.num_loops != 4:
         run_name += f"_loop{args.num_loops}"
+    if args.dataset != "wikitext-2-raw-v1":
+        run_name += "_wt103"
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optimizer, max_lr=args.lr, total_steps=total_steps,
         pct_start=args.warmup_steps / total_steps,

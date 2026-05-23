@@ -23,12 +23,12 @@ from delta_model import DeltaConfig, DeltaLoopedTransformer
 
 # ── Data ──────────────────────────────────────────────────────────────────────
 
-def create_dataloaders(seq_len: int, batch_size: int, num_workers: int = 0):
+def create_dataloaders(seq_len: int, batch_size: int, num_workers: int = 0, dataset_name: str = "wikitext-2-raw-v1"):
     tokenizer = GPT2TokenizerFast.from_pretrained("gpt2")
     tokenizer.pad_token = tokenizer.eos_token
 
     def load_split(split):
-        dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split=split)
+        dataset = load_dataset("wikitext", dataset_name, split=split)
         tokens = []
         for item in dataset:
             text = item["text"].strip()
@@ -127,6 +127,8 @@ def parse_args():
     p.add_argument("--device", type=str, default="cuda")
     p.add_argument("--output_dir", type=str, default="./results")
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--dataset", type=str, default="wikitext-2-raw-v1",
+                   help="wikitext-2-raw-v1 or wikitext-103-raw-v1")
     return p.parse_args()
 
 
@@ -140,7 +142,7 @@ def main():
 
     # Data
     print("Loading data...")
-    train_loader, val_loader, _ = create_dataloaders(args.seq_len, args.batch_size)
+    train_loader, val_loader, _ = create_dataloaders(args.seq_len, args.batch_size, dataset_name=args.dataset)
 
     # Model
     config = DeltaConfig(
@@ -205,6 +207,8 @@ def main():
         run_name += f"_loop{args.num_loops}"
     if args.attn_inject_every > 0:
         run_name += f"_inj{args.attn_inject_every}"
+    if args.dataset != "wikitext-2-raw-v1":
+        run_name += "_wt103"
     if args.baseline_ckpt:
         run_name += "_frombaseline"
     if args.freeze_full_block:
