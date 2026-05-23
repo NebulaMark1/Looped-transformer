@@ -41,6 +41,8 @@ def load_results(results_dir: str):
                 key += "_frombl"
             if cfg.get("freeze_full_block"):
                 key += "_frz"
+        elif "num_full" in cfg and "num_ffn" in cfg:
+            key = f"asym_{cfg['num_full']}f_{cfg['num_ffn']}ffn"
         else:
             continue
         if cfg.get("embed_dim", 384) != 384:

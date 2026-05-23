@@ -17,7 +17,10 @@ def auto_detect(state_dict, ckpt_path):
     has_lora = any(".lora_A" in k for k in state_dict)
     has_blocks = any(k.startswith("blocks.") for k in state_dict)
 
-    if has_full_blocks and has_delta_blocks:
+    has_asym_ffn = any("ffn_blocks." in k for k in state_dict)
+    if has_full_blocks and has_asym_ffn:
+        model_type = "asym"
+    elif has_full_blocks and has_delta_blocks:
         model_type = "delta"
     elif has_lora:
         model_type = "lora"
@@ -31,15 +34,36 @@ def auto_detect(state_dict, ckpt_path):
     else:
         model_type = "baseline"
 
-    # -- num_layers from block indices --
-    prefix = "full_blocks." if model_type == "delta" else "blocks."
-    layer_indices = set()
-    for k in state_dict:
-        if k.startswith(prefix):
-            m = re.match(rf"{re.escape(prefix)}(\d+)\.", k)
-            if m:
-                layer_indices.add(int(m.group(1)))
-    num_layers = max(layer_indices) + 1 if layer_indices else 3
+    # -- num_layers / num_full / num_ffn --
+    num_layers = 3
+    num_full = None
+    num_ffn = None
+    if model_type == "asym":
+        full_indices = set()
+        ffn_indices = set()
+        for k in state_dict:
+            if k.startswith("full_blocks."):
+                m = re.match(r"full_blocks\.(\d+)\.", k)
+                if m: full_indices.add(int(m.group(1)))
+            elif k.startswith("ffn_blocks."):
+                m = re.match(r"ffn_blocks\.(\d+)\.", k)
+                if m: ffn_indices.add(int(m.group(1)))
+        num_full = max(full_indices) + 1 if full_indices else 0
+        num_ffn = max(ffn_indices) + 1 if ffn_indices else 0
+        num_layers = num_full + num_ffn
+    elif model_type == "delta":
+        prefix = "full_blocks."
+    else:
+        prefix = "blocks."
+
+    if num_layers == 3 and num_full is None:
+        layer_indices = set()
+        for k in state_dict:
+            if k.startswith(prefix):
+                m = re.match(rf"{re.escape(prefix)}(\d+)\.", k)
+                if m:
+                    layer_indices.add(int(m.group(1)))
+        num_layers = max(layer_indices) + 1 if layer_indices else 3
 
     # -- num_heads: prefer head_dim ≈ 64 (standard practice) --
     possible_heads = [h for h in [4, 5, 6, 7, 8, 9, 10, 12, 14, 16]
@@ -87,6 +111,7 @@ def auto_detect(state_dict, ckpt_path):
     return {
         "model_type": model_type, "embed_dim": embed_dim, "num_heads": num_heads,
         "num_layers": num_layers, "num_loops": num_loops,
+        "num_full": num_full, "num_ffn": num_ffn,
         "delta_bottleneck": delta_bottleneck,
     }
 
@@ -145,6 +170,14 @@ def main():
             delta_bottleneck=cfg["delta_bottleneck"],
         )
         model = DeltaLoopedTransformer(dc).to(device)
+    elif cfg["model_type"] == "asym":
+        from asym_model import AsymConfig, AsymTransformer
+        ac = AsymConfig(
+            max_seq_len=256, embed_dim=cfg["embed_dim"],
+            num_heads=cfg["num_heads"], num_full=cfg["num_full"],
+            num_ffn=cfg["num_ffn"],
+        )
+        model = AsymTransformer(ac).to(device)
     else:
         from model import LoopedTransformerConfig, LoopedTransformer
         from model import LoopedTransformerConfig as LTC
