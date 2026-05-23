@@ -27,7 +27,7 @@ from model import create_model, print_param_summary
 class WikiTextDataset(IterableDataset):
     """Stream WikiText-2 as chunks of token IDs."""
 
-    def __init__(self, split: str, seq_len: int, tokenizer):
+    def __init__(self, split: str, seq_len: int, tokenizer, dataset_name: str = "wikitext-2-raw-v1"):
         self.seq_len = seq_len
         dataset = load_dataset("wikitext", dataset_name, split=split)
         self.data = dataset
@@ -76,8 +76,8 @@ def create_dataloaders(seq_len: int, batch_size: int, num_workers: int = 0, data
     tokenizer = GPT2TokenizerFast.from_pretrained("gpt2")
     tokenizer.pad_token = tokenizer.eos_token
 
-    train_ds = WikiTextDataset("train", seq_len, tokenizer)
-    val_ds = WikiTextDataset("validation", seq_len, tokenizer)
+    train_ds = WikiTextDataset("train", seq_len, tokenizer, dataset_name)
+    val_ds = WikiTextDataset("validation", seq_len, tokenizer, dataset_name)
 
     # Sort for val to get stable batches (converted to list since IterableDataset)
     val_data = list(val_ds)
