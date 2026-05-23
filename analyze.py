@@ -43,6 +43,8 @@ def load_results(results_dir: str):
                 key += "_frz"
         else:
             continue
+        if cfg.get("embed_dim", 384) != 384:
+            key += f"_d{cfg['embed_dim']}"
         if cfg.get("num_loops", 4) != 4:
             key += f"_L{cfg['num_loops']}"
         results[key] = data
