@@ -122,12 +122,13 @@ def parse_args():
     p.add_argument("--prompt", type=str, default="The capital of France is")
     p.add_argument("--max_tokens", type=int, default=50)
     p.add_argument("--temperature", type=float, default=0.8)
-    p.add_argument("--top_k", type=int, default=40)
+    p.add_argument("--top_k", type=int, default=0)
+    p.add_argument("--top_p", type=float, default=0.9)
     return p.parse_args()
 
 
 @torch.no_grad()
-def generate(model, tokenizer, prompt: str, max_tokens: int, temperature: float, top_k: int):
+def generate(model, tokenizer, prompt: str, max_tokens: int, temperature: float, top_k: int, top_p: float):
     device = next(model.parameters()).device
     input_ids = tokenizer.encode(prompt, return_tensors="pt").to(device)
     generated = input_ids.clone()
@@ -137,9 +138,19 @@ def generate(model, tokenizer, prompt: str, max_tokens: int, temperature: float,
         ctx = generated[:, -256:]
         out = model(ctx)
         logits = out["logits"][:, -1, :] / max(temperature, 0.01)
+
         if top_k > 0:
             v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
             logits[logits < v[:, -1:]] = float("-inf")
+        elif top_p > 0:
+            sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+            cumulative_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
+            sorted_indices_to_remove = cumulative_probs > top_p
+            sorted_indices_to_remove[:, 1:] = sorted_indices_to_remove[:, :-1].clone()
+            sorted_indices_to_remove[:, 0] = False
+            indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
+            logits[indices_to_remove] = float("-inf")
+
         probs = torch.softmax(logits, dim=-1)
         next_token = torch.multinomial(probs, 1)
         generated = torch.cat([generated, next_token], dim=1)
@@ -194,7 +205,7 @@ def main():
 
     print(f"\nPrompt: {args.prompt}")
     print(f"Output:  ", end="", flush=True)
-    text = generate(model, tokenizer, args.prompt, args.max_tokens, args.temperature, args.top_k)
+    text = generate(model, tokenizer, args.prompt, args.max_tokens, args.temperature, args.top_k, args.top_p)
     print(text)
 
 
