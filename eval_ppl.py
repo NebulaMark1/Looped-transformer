@@ -115,13 +115,14 @@ def eval_ppl(model, tokenizer, dataset_config, device, seq_len=256, max_samples=
     for i in range(0, len(tokens) - seq_len, seq_len):
         chunk = tokens[i:i + seq_len + 1]
         if len(chunk) < seq_len + 1: continue
-        input_ids = torch.tensor([chunk[:-1]], device=device)
+        input_ids = torch.tensor([chunk[:seq_len]], device=device)
+        labels = torch.tensor(chunk[1:seq_len + 1], device=device)
 
         out = model(input_ids)
-        shift_logits = out["logits"][0, :-1]
-        shift_labels = torch.tensor(chunk[1:], device=device)
-        loss = F.cross_entropy(shift_logits.float(), shift_labels, reduction="sum")
-        n_tokens = len(chunk) - 1
+        shift_logits = out["logits"][0, :-1, :].float()
+        shift_labels = labels[:-1]
+        loss = F.cross_entropy(shift_logits, shift_labels, reduction="sum")
+        n_tokens = shift_labels.numel()
 
         batch_loss += loss.item()
         batch_tokens += n_tokens
