@@ -160,8 +160,9 @@ def main():
     print(f"Params: {total:,} total, {trans:,} transformer\n")
 
     benchmarks = [
-        ("WikiText-2",      "wikitext", "wikitext-2-raw-v1", "test"),
-        ("WikiText-103",    "wikitext", "wikitext-103-raw-v1", "test"),
+        ("WikiText-2",          "wikitext", "wikitext-2-raw-v1", "test"),
+        ("WikiText-103",        "wikitext", "wikitext-103-raw-v1", "test"),
+        ("TinyStories",         "roneneldan/TinyStories", None, "validation"),
     ]
 
     results = {}
