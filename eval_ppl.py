@@ -112,9 +112,9 @@ def eval_ppl(model, tokenizer, dataset_config, device, seq_len=256, max_samples=
     batch_loss, batch_tokens = 0.0, 0
     n_seen = 0
 
-    for i in range(0, len(tokens) - seq_len - 1, seq_len):
+    for i in range(0, len(tokens) - seq_len, seq_len):
         chunk = tokens[i:i + seq_len + 1]
-        if len(chunk) < 2: continue
+        if len(chunk) < seq_len + 1: continue
         input_ids = torch.tensor([chunk[:-1]], device=device)
 
         out = model(input_ids)
@@ -161,7 +161,6 @@ def main():
     benchmarks = [
         ("WikiText-2",      "wikitext", "wikitext-2-raw-v1", "test"),
         ("WikiText-103",    "wikitext", "wikitext-103-raw-v1", "test"),
-        ("Penn Treebank",   "ptb_text_only", "penn_treebank", "test"),
     ]
 
     results = {}
