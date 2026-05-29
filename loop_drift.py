@@ -210,6 +210,110 @@ def main():
         # Show L2 deviation
         print(f"{key:<18} {avg_cos:>10.6f} {avg_l2:>10.4f}")
 
+    # ── Single-position noise: which loop is most sensitive? ──
+    print(f"\n{'='*60}")
+    print("  Single-position noise: perturb hidden state at ONE loop, measure final KL")
+    print(f"{'='*60}")
+
+    # Run clean pass to get baseline hidden states
+    clean_states = {}
+    tracker_clean = DeltaTracker(orig) if model_type == "delta" else BaselineTracker(orig)
+
+    clean_kl_per_pos = {}
+    for ids in input_ids_list:
+        tracker_clean(ids)  # populate intermediate states
+        clean_outs = orig(ids)["logits"].float()
+
+        for pos_key in tracker_clean.intermediate:
+            if pos_key not in clean_kl_per_pos:
+                clean_kl_per_pos[pos_key] = []
+
+            # Perturb hidden state at this position by adding noise
+            clean_h = tracker_clean.intermediate[pos_key].clone()
+
+            # Re-run from this position with perturbed hidden state
+            # For simplicity: add 1% noise to hidden state, measure final KL
+            noise_scale = 0.01
+            noise = torch.randn_like(clean_h) * clean_h.norm() * noise_scale / math.sqrt(clean_h.numel())
+            noisy_h = clean_h + noise
+
+            # Create a modified model that injects noisy_h at the right position
+            if model_type == "delta":
+                tracker_mod = DeltaTracker(orig)
+                monkey_states = {"pos": pos_key, "val": noisy_h}
+                # Monkey-patch the forward to inject
+                tracker_mod._inject = monkey_states
+                _orig_forward = tracker_mod.forward
+
+                def make_injected_forward(original_forward, inject_info):
+                    def injected_forward(input_ids):
+                        B, T = input_ids.shape
+                        pos = torch.arange(T, device=input_ids.device).unsqueeze(0)
+                        x = tracker_mod.token_embedding(input_ids) + tracker_mod.position_embedding(pos)
+                        x = tracker_mod.dropout(x)
+
+                        injected = False
+                        for layer_idx in range(tracker_mod.config.num_layers):
+                            x = tracker_mod.full_blocks[layer_idx](x)
+                            key0 = f"L{layer_idx}_loop0"
+                            if key0 == inject_info["pos"] and not injected:
+                                x = inject_info["val"]
+                                injected = True
+
+                            for d in range(tracker_mod.config.num_loops - 1):
+                                delta_out = tracker_mod.delta_blocks[layer_idx](x, d)
+                                x_before = x
+                                x = x + delta_out
+                                key_d = f"L{layer_idx}_loop{d+1}"
+                                if key_d == inject_info["pos"] and not injected:
+                                    x = inject_info["val"]
+                                    injected = True
+
+                        x = tracker_mod.ln_final(x)
+                        logits = F.linear(x, tracker_mod.token_embedding.weight)
+                        return {"logits": logits}
+                    return injected_forward
+
+                tracker_mod.forward = make_injected_forward(tracker_mod.forward, {"pos": pos_key, "val": noisy_h})
+                out_mod = tracker_mod(ids)
+                kl = kl_div(clean_outs, out_mod["logits"])
+                clean_kl_per_pos[pos_key].append(kl)
+
+            else:
+                # For baseline: same approach
+                tracker_mod = BaselineTracker(orig)
+                def make_baseline_injected(trk, inject_pos, inject_val):
+                    def injected(input_ids):
+                        B, T = input_ids.shape
+                        pos_t = torch.arange(T, device=input_ids.device).unsqueeze(0)
+                        x = trk.token_embedding(input_ids) + trk.position_embedding(pos_t)
+                        x = trk.dropout(x)
+                        injected = False
+                        for blk_idx, blk in enumerate(trk.blocks):
+                            for loop_idx in range(trk.config.num_loops):
+                                x = blk(x, loop_idx)
+                                key = f"B{blk_idx}_loop{loop_idx}"
+                                if key == inject_pos and not injected:
+                                    x = inject_val
+                                    injected = True
+                        x = trk.ln_final(x)
+                        logits = F.linear(x, trk.token_embedding.weight)
+                        return {"logits": logits}
+                    return injected
+                tracker_mod.forward = make_baseline_injected(tracker_mod, pos_key, noisy_h)
+                out_mod = tracker_mod(ids)
+                kl = kl_div(clean_outs, out_mod["logits"])
+                clean_kl_per_pos[pos_key].append(kl)
+
+    print(f"\n{'Position':<18} {'KL Div (avg)':>14}")
+    print("-" * 36)
+    for key in sorted(clean_kl_per_pos.keys(),
+                      key=lambda k: (int(k.split('_')[0][1]) if '_' in k else 0,
+                                     int(k.split('loop')[-1]) if 'loop' in k.split('_')[-1] else 0)):
+        vals = clean_kl_per_pos[key]
+        avg = sum(vals) / len(vals)
+        print(f"{key:<18} {avg:>14.4f}")
+
     # ── Show growth ratios ──
     keys_sorted = sorted(all_kl.keys(),
                          key=lambda k: (int(k.split('_')[0][1]) if '_' in k else 0,
