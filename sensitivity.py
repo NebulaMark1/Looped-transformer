@@ -86,10 +86,16 @@ def main():
     dim, heads, n_layers, n_loops, delta_bn, model_type = auto_detect(state_dict, args.checkpoint)
     print(f"Model: {model_type}, d={dim}, layers={n_layers}, loops={n_loops}")
 
-    from delta_model import DeltaConfig, DeltaLoopedTransformer
-    cfg = DeltaConfig(max_seq_len=256, embed_dim=dim, num_heads=heads,
-                      num_layers=n_layers, num_loops=n_loops,
-                      delta_bottleneck=delta_bn)
+    if model_type == "delta":
+        from delta_model import DeltaConfig, DeltaLoopedTransformer
+        cfg = DeltaConfig(max_seq_len=256, embed_dim=dim, num_heads=heads,
+                          num_layers=n_layers, num_loops=n_loops,
+                          delta_bottleneck=delta_bn)
+    else:
+        from model import LoopedTransformerConfig, LoopedTransformer as LoopedTM
+        cfg = LoopedTransformerConfig(mode="baseline", max_seq_len=256,
+                                      embed_dim=dim, num_heads=heads,
+                                      num_layers=n_layers, num_loops=n_loops)
 
     # Test inputs: diverse prompts
     prompts = [
@@ -101,27 +107,30 @@ def main():
     input_ids_list = [tokenizer.encode(p, return_tensors="pt").to(device) for p in prompts]
 
     # ── Define perturbation targets ──
-    targets = {
-        "full_attn":   ["full_blocks.", "q_proj", "full_blocks.", "k_proj",
-                        "full_blocks.", "v_proj", "full_blocks.", "o_proj"],
-        "full_ffn":    ["full_blocks.", "ff_up", "full_blocks.", "ff_down"],
-        "full_ln":     ["full_blocks.", "ln1", "full_blocks.", "ln2"],
-        "delta_ffn":   ["delta_blocks.", "fc1", "delta_blocks.", "fc2"],
-        "delta_ln":    ["delta_blocks.", "ln_ffn"],
-        "embedding":   ["token_embedding", "position_embedding"],
-        "ln_final":    ["ln_final"],
-        # Per-layer and per-loop breakdowns
-        "full_layer0": ["full_blocks.0."],
-        "full_layer1": ["full_blocks.1."],
-        "full_layer2": ["full_blocks.2."],
-        # Deep layers (if present)
-        "full_layer_deep": ["full_blocks.3.", "full_blocks.4.", "full_blocks.5.",
-                            "full_blocks.6.", "full_blocks.7."],
-    }
+    prefix = "full_blocks." if model_type == "delta" else "blocks."
 
-    n_layers_actual = 3
-    if n_layers > 3:
-        targets["full_layer_deep"] = [f"full_blocks.{i}." for i in range(3, n_layers)]
+    targets = {}
+    targets["attn"] = [f"{prefix}0.q_proj", f"{prefix}0.k_proj",
+                       f"{prefix}0.v_proj", f"{prefix}0.o_proj"]
+    targets["ffn"]  = [f"{prefix}0.ff_up", f"{prefix}0.ff_down"]
+    targets["ln"]   = [f"{prefix}0.ln1", f"{prefix}0.ln2"]
+    targets["embedding"] = ["token_embedding", "position_embedding"]
+    targets["ln_final"]  = ["ln_final"]
+
+    if model_type == "delta":
+        targets["delta_ffn"] = ["delta_blocks.0.fc1", "delta_blocks.0.fc2"]
+        targets["delta_ln"]  = ["delta_blocks.0.ln_ffn"]
+
+    # Per-layer breakdown
+    for l in range(n_layers):
+        targets[f"layer{l}"] = [f"{prefix}{l}."]
+
+    # Per-component sensitivity for all layers
+    for lay in range(n_layers):
+        targets[f"attn_L{lay}"]    = [f"{prefix}{lay}.q_proj", f"{prefix}{lay}.k_proj",
+                                       f"{prefix}{lay}.v_proj", f"{prefix}{lay}.o_proj"]
+        targets[f"ffn_L{lay}"]     = [f"{prefix}{lay}.ff_up", f"{prefix}{lay}.ff_down"]
+        targets[f"ln_L{lay}"]      = [f"{prefix}{lay}.ln1", f"{prefix}{lay}.ln2"]
 
     print(f"\n{'Target':<25} {'KL Div':>10} {'Rel%':>8}")
     print(f"{'-'*45}")
@@ -129,27 +138,20 @@ def main():
     results = {}
     for name, target_patterns in targets.items():
         # Check if these params exist
-        model = DeltaLoopedTransformer(cfg).to(device)
+        if model_type == "delta":
+            model = DeltaLoopedTransformer(cfg).to(device)
+            model_orig = DeltaLoopedTransformer(cfg).to(device)
+        else:
+            model = LoopedTM(cfg).to(device)
+            model_orig = LoopedTM(cfg).to(device)
+
         model.load_state_dict(state_dict, strict=True)
-        model.eval()
-
-        has_params = False
-        for pname, _ in model.named_parameters():
-            for tp in target_patterns:
-                if tp in pname:
-                    has_params = True
-                    break
-
-        if not has_params:
-            continue
-
-        # Add noise
-        add_noise_to_params(model, target_patterns, args.noise_scale)
-
-        # Measure KL
-        model_orig = DeltaLoopedTransformer(cfg).to(device)
         model_orig.load_state_dict(state_dict, strict=True)
+        model.eval()
         model_orig.eval()
+
+        # Inject noise into target params
+        add_noise_to_params(model, target_patterns, args.noise_scale)
 
         total_kl = 0.0
         for ids in input_ids_list:
