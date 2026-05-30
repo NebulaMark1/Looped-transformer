@@ -129,6 +129,8 @@ def parse_args():
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--dataset", type=str, default="wikitext-2-raw-v1",
                    help="wikitext-2-raw-v1 or wikitext-103-raw-v1")
+    p.add_argument("--pretrained", type=str, default=None,
+                   help="Path to pretrained checkpoint to initialize from")
     return p.parse_args()
 
 
@@ -159,6 +161,13 @@ def main():
         max_seq_len=args.seq_len,
     )
     model = DeltaLoopedTransformer(config).to(device)
+
+    # Load pretrained weights
+    if args.pretrained:
+        print(f"Loading pretrained: {args.pretrained}")
+        pretrained_state = torch.load(args.pretrained, map_location=device)
+        missing, unexpected = model.load_state_dict(pretrained_state, strict=True)
+        print(f"  Loaded all params from pretrained checkpoint")
 
     # Init full_blocks from trained baseline to skip heavy attention training
     if args.baseline_ckpt:
