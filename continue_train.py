@@ -91,10 +91,10 @@ def collate(batch):
 
 # ── Training ───────────────────────────────────────────────────────────────────
 
-def train_epoch(model, loader, optim, sched, device):
+def train_epoch(model, loader, optim, sched, device, total_steps=0):
     model.train()
     total_loss, total_tokens = 0.0, 0
-    for batch in tqdm(loader, desc="Train", leave=False):
+    for batch in tqdm(loader, desc="Train", total=total_steps):
         ids = batch["input_ids"].to(device)
         out = model(ids, labels=ids)
         loss = out["loss"]
@@ -202,7 +202,7 @@ def main():
     t0 = time.time()
 
     for ep in range(1, args.epochs + 1):
-        tl = train_epoch(model, train_loader, optim, sched, device)
+        tl = train_epoch(model, train_loader, optim, sched, device, steps_per_epoch)
         val_ppl = validate_wt2(model, tokenizer, device)
         train_ppl = math.exp(tl)
         metrics.append({"epoch": ep, "train_ppl": train_ppl, "val_wt2_ppl": val_ppl})
