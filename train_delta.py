@@ -133,6 +133,8 @@ def parse_args():
                    help="Path to pretrained checkpoint to initialize from")
     p.add_argument("--resume", type=str, default=None,
                    help="Resume from full training checkpoint (model+optim+scheduler+epoch)")
+    p.add_argument("--tag", type=str, default=None,
+                   help="Suffix for checkpoint filenames to avoid overwriting")
     return p.parse_args()
 
 
@@ -224,6 +226,8 @@ def main():
         run_name += "_frombaseline"
     if args.freeze_full_block:
         run_name += "_freezefull"
+    if args.tag:
+        run_name += f"_{args.tag}"
 
     # Training
     metrics_history = []
