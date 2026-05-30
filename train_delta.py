@@ -131,6 +131,8 @@ def parse_args():
                    help="wikitext-2-raw-v1 or wikitext-103-raw-v1")
     p.add_argument("--pretrained", type=str, default=None,
                    help="Path to pretrained checkpoint to initialize from")
+    p.add_argument("--resume", type=str, default=None,
+                   help="Resume from full training checkpoint (model+optim+scheduler+epoch)")
     return p.parse_args()
 
 
@@ -226,9 +228,22 @@ def main():
     # Training
     metrics_history = []
     best_val_ppl = float("inf")
+    start_epoch = 1
     train_start = time.time()
 
-    for epoch in range(1, args.epochs + 1):
+    # Resume from full checkpoint
+    if args.resume:
+        print(f"Resuming from {args.resume}")
+        ckpt = torch.load(args.resume, map_location=device)
+        model.load_state_dict(ckpt["model"])
+        optimizer.load_state_dict(ckpt["optimizer"])
+        scheduler.load_state_dict(ckpt["scheduler"])
+        start_epoch = ckpt["epoch"] + 1
+        metrics_history = ckpt.get("metrics", [])
+        best_val_ppl = ckpt.get("best_val_ppl", float("inf"))
+        print(f"  Resuming at epoch {start_epoch}, best PPL so far: {best_val_ppl:.2f}")
+
+    for epoch in range(start_epoch, args.epochs + 1):
         train_loss = train_epoch(model, train_loader, optimizer, scheduler, device, epoch)
         val_loss = validate(model, val_loader, device)
         train_ppl, val_ppl = math.exp(train_loss), math.exp(val_loss)
@@ -239,6 +254,16 @@ def main():
         if val_ppl < best_val_ppl:
             best_val_ppl = val_ppl
             torch.save(model.state_dict(), os.path.join(args.output_dir, f"{run_name}_best.pt"))
+
+        # Save full training state for resuming
+        torch.save({
+            "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "scheduler": scheduler.state_dict(),
+            "epoch": epoch,
+            "metrics": metrics_history,
+            "best_val_ppl": best_val_ppl,
+        }, os.path.join(args.output_dir, f"{run_name}_resume.pt"))
 
     total_time = time.time() - train_start
 
