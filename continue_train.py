@@ -91,10 +91,11 @@ def collate(batch):
 
 # ── Training ───────────────────────────────────────────────────────────────────
 
-def train_epoch(model, loader, optim, sched, device, total_steps=0):
+def train_epoch(model, loader, optim, sched, device, total_steps=0, epoch=0):
     model.train()
     total_loss, total_tokens = 0.0, 0
-    for batch in tqdm(loader, desc="Train", total=total_steps):
+    pbar = tqdm(loader, desc=f"Epoch {epoch}", total=total_steps)
+    for batch in pbar:
         ids = batch["input_ids"].to(device)
         out = model(ids, labels=ids)
         loss = out["loss"]
@@ -105,6 +106,8 @@ def train_epoch(model, loader, optim, sched, device, total_steps=0):
         sched.step()
         total_loss += loss.item() * ids.numel()
         total_tokens += ids.numel()
+        pbar.set_postfix({"loss": f"{loss.item():.3f}", "ppl": f"{math.exp(loss.item()):.1f}",
+                          "lr": f"{sched.get_last_lr()[0]:.2e}"})
     return total_loss / total_tokens
 
 
@@ -202,7 +205,7 @@ def main():
     t0 = time.time()
 
     for ep in range(1, args.epochs + 1):
-        tl = train_epoch(model, train_loader, optim, sched, device, steps_per_epoch)
+        tl = train_epoch(model, train_loader, optim, sched, device, steps_per_epoch, epoch=ep)
         val_ppl = validate_wt2(model, tokenizer, device)
         train_ppl = math.exp(tl)
         metrics.append({"epoch": ep, "train_ppl": train_ppl, "val_wt2_ppl": val_ppl})
