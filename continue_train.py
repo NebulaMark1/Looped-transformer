@@ -51,14 +51,21 @@ def auto_detect(state_dict, ckpt_path):
 # ── Streaming dataset for FineWeb ──────────────────────────────────────────────
 
 class StreamingDataset(IterableDataset):
-    def __init__(self, tokenizer, seq_len, total_tokens=200_000_000):
+    def __init__(self, tokenizer, seq_len, dataset="fineweb", total_tokens=200_000_000):
         self.tokenizer = tokenizer
         self.seq_len = seq_len
         self.total_tokens = total_tokens
+        self.dataset = dataset
 
     def __iter__(self):
-        ds = load_dataset("HuggingFaceFW/fineweb-edu", split="train",
-                          streaming=True, trust_remote_code=True)
+        if self.dataset == "fineweb":
+            ds = load_dataset("HuggingFaceFW/fineweb-edu", split="train",
+                              streaming=True, trust_remote_code=True)
+        elif self.dataset == "wikitext-103":
+            ds = load_dataset("wikitext", "wikitext-103-raw-v1", split="train")
+        else:
+            ds = load_dataset("wikitext", self.dataset, split="train")
+
         buffer = []
         n = 0
         for item in ds:
@@ -167,7 +174,7 @@ def main():
 
     # Data
     print("Loading streaming data...")
-    train_ds = StreamingDataset(tokenizer, 256, total_tokens=args.total_tokens)
+    train_ds = StreamingDataset(tokenizer, 256, dataset=args.dataset, total_tokens=args.total_tokens)
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, collate_fn=collate)
 
     # Optimizer
