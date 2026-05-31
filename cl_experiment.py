@@ -23,10 +23,15 @@ from tqdm import tqdm
 
 def auto_detect(state_dict, ckpt_path):
     d = state_dict["token_embedding.weight"].shape[1]
+    has_full = any("full_blocks." in k for k in state_dict)
+    has_delta = any("delta_blocks." in k for k in state_dict)
+
+    model_type = "delta" if (has_full and has_delta) else "baseline"
+    prefix = "full_blocks." if model_type == "delta" else "blocks."
     indices = set()
     for k in state_dict:
-        if k.startswith("blocks."):
-            m = re.match(r"blocks\.(\d+)\.", k)
+        if k.startswith(prefix):
+            m = re.match(rf"{re.escape(prefix)}(\d+)\.", k)
             if m: indices.add(int(m.group(1)))
     layers = max(indices) + 1 if indices else 3
     possible = [h for h in [4,5,6,7,8,9,10,12] if d % h == 0]
@@ -34,15 +39,21 @@ def auto_detect(state_dict, ckpt_path):
     loops = 4
     m = re.search(r"_loop(\d+)", ckpt_path)
     if m: loops = int(m.group(1))
-    return d, heads, layers, loops
+    return d, heads, layers, loops, model_type
 
 
-def make_model(dim, heads, n_layers, n_loops, device):
-    from model import LoopedTransformerConfig, LoopedTransformer
-    cfg = LoopedTransformerConfig(mode="baseline", max_seq_len=256,
-                                  embed_dim=dim, num_heads=heads,
-                                  num_layers=n_layers, num_loops=n_loops)
-    return LoopedTransformer(cfg).to(device)
+def make_model(dim, heads, n_layers, n_loops, device, model_type="baseline"):
+    if model_type == "delta":
+        from delta_model import DeltaConfig, DeltaLoopedTransformer
+        cfg = DeltaConfig(max_seq_len=256, embed_dim=dim, num_heads=heads,
+                          num_layers=n_layers, num_loops=n_loops)
+        return DeltaLoopedTransformer(cfg).to(device)
+    else:
+        from model import LoopedTransformerConfig, LoopedTransformer
+        cfg = LoopedTransformerConfig(mode="baseline", max_seq_len=256,
+                                      embed_dim=dim, num_heads=heads,
+                                      num_layers=n_layers, num_loops=n_loops)
+        return LoopedTransformer(cfg).to(device)
 
 
 def load_tinystories(tokenizer, seq_len=256, max_tokens=5_000_000):
@@ -81,13 +92,15 @@ def apply_strategy(model, strategy):
 
     if strategy == "protect":
         for name, param in model.named_parameters():
-            # Attention names: q_proj, k_proj, v_proj, o_proj
             is_attn = any(x in name for x in ["q_proj", "k_proj", "v_proj", "o_proj"])
             is_emb = "embedding" in name
-            is_lora = "lora_" in name
-            if is_attn or is_emb or is_lora:
+            is_delta = "delta_blocks." in name
+            # FFN + LN + delta stay trainable; attn + emb frozen
+            if is_attn or is_emb:
                 param.requires_grad = False
-            # FFN (ff_up, ff_down) + LN (ln1, ln2, ln_final) stay trainable
+            # delta blocks always trainable (our architecture's strength)
+            if is_delta:
+                param.requires_grad = True
 
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total = sum(p.numel() for p in model.parameters())
@@ -113,11 +126,11 @@ def main():
     tokenizer.pad_token = tokenizer.eos_token
 
     state_dict = torch.load(args.checkpoint, map_location="cpu")
-    dim, heads, n_layers, n_loops = auto_detect(state_dict, args.checkpoint)
-    print(f"Model: d={dim}, layers={n_layers}, loops={n_loops}")
+    dim, heads, n_layers, n_loops, model_type = auto_detect(state_dict, args.checkpoint)
+    print(f"Model: {model_type}, d={dim}, layers={n_layers}, loops={n_loops}")
     print(f"Strategy: {args.strategy}")
 
-    model = make_model(dim, heads, n_layers, n_loops, device)
+    model = make_model(dim, heads, n_layers, n_loops, device, model_type)
     model.load_state_dict(state_dict, strict=True)
 
     # ── Pre-training performance ──
