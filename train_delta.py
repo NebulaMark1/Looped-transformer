@@ -231,7 +231,11 @@ def main():
         {"params": no_decay, "weight_decay": 0.0, "lr": args.lr},
     ], betas=(0.9, 0.95))
 
-    total_steps = len(train_loader) * args.epochs
+    try:
+        total_steps = len(train_loader) * args.epochs
+    except TypeError:
+        # Streaming dataset has no len(), estimate from seq_len * batch_size
+        total_steps = (500_000_000 // (args.seq_len * args.batch_size)) * args.epochs
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optimizer, max_lr=args.lr, total_steps=total_steps,
         pct_start=args.warmup_steps / total_steps,
