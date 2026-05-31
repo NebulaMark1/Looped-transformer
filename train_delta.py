@@ -242,6 +242,7 @@ def main():
         model.load_state_dict(ckpt["model"])
         optimizer.load_state_dict(ckpt["optimizer"])
         scheduler.load_state_dict(ckpt["scheduler"])
+        scheduler.total_steps = len(train_loader) * args.epochs  # fix for extended training
         start_epoch = ckpt["epoch"] + 1
         metrics_history = ckpt.get("metrics", [])
         best_val_ppl = ckpt.get("best_val_ppl", float("inf"))
