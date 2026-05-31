@@ -102,6 +102,10 @@ def apply_strategy(model, strategy):
             if is_delta:
                 param.requires_grad = True
 
+    if strategy == "delta_only":
+        for name, param in model.named_parameters():
+            param.requires_grad = ("delta_blocks." in name)
+
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total = sum(p.numel() for p in model.parameters())
     print(f"  Trainable: {trainable:,} / {total:,} ({trainable/total*100:.1f}%)")
@@ -110,7 +114,7 @@ def apply_strategy(model, strategy):
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--checkpoint", type=str, required=True)
-    p.add_argument("--strategy", type=str, default="full", choices=["full", "protect"])
+    p.add_argument("--strategy", type=str, default="full", choices=["full", "protect", "delta_only"])
     p.add_argument("--epochs", type=int, default=1)
     p.add_argument("--lr", type=float, default=1e-4)
     p.add_argument("--batch_size", type=int, default=8)
