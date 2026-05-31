@@ -27,37 +27,64 @@ def create_dataloaders(seq_len: int, batch_size: int, num_workers: int = 0, data
     tokenizer = GPT2TokenizerFast.from_pretrained("gpt2")
     tokenizer.pad_token = tokenizer.eos_token
 
-    def load_split(split):
-        dataset = load_dataset("wikitext", dataset_name, split=split)
-        tokens = []
-        for item in dataset:
-            text = item["text"].strip()
-            if text:
-                tokens.extend(tokenizer.encode(text))
-        return torch.tensor(tokens, dtype=torch.long)
-
-    train_tokens = load_split("train")
-    val_tokens = load_split("validation")
-
-    def make_chunks(tks, sl):
-        chunks = []
-        for i in range(0, len(tks) - sl, sl):
-            chunk = tks[i:i + sl + 1]
-            if len(chunk) > 1:
-                chunks.append({"input_ids": chunk[:-1], "labels": chunk[1:]})
-        return chunks
-
-    train_chunks = make_chunks(train_tokens, seq_len)
-    val_chunks = make_chunks(val_tokens, seq_len)
-
     def collate(batch):
         max_len = max(item["input_ids"].size(0) for item in batch)
         inputs = [F.pad(item["input_ids"], (0, max_len - item["input_ids"].size(0)), value=0) for item in batch]
         labels = [F.pad(item["labels"], (0, max_len - item["labels"].size(0)), value=0) for item in batch]
         return {"input_ids": torch.stack(inputs), "labels": torch.stack(labels)}
 
-    train_loader = DataLoader(train_chunks, batch_size=batch_size, shuffle=True, collate_fn=collate)
+    # Validation: always WT-2 for consistency
+    val_dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="validation")
+    val_tokens = []
+    for item in val_dataset:
+        text = item["text"].strip()
+        if text: val_tokens.extend(tokenizer.encode(text))
+    val_tokens = torch.tensor(val_tokens, dtype=torch.long)
+    val_chunks = []
+    for i in range(0, len(val_tokens) - seq_len, seq_len):
+        chunk = val_tokens[i:i + seq_len + 1]
+        if len(chunk) > 1:
+            val_chunks.append({"input_ids": chunk[:-1], "labels": chunk[1:]})
     val_loader = DataLoader(val_chunks, batch_size=batch_size, shuffle=False, collate_fn=collate)
+
+    # Training: wikitext (pre-tokenized) or fineweb (streaming)
+    if dataset_name in ("wikitext-2-raw-v1", "wikitext-103-raw-v1"):
+        dataset = load_dataset("wikitext", dataset_name, split="train")
+        train_tokens = []
+        for item in dataset:
+            text = item["text"].strip()
+            if text: train_tokens.extend(tokenizer.encode(text))
+        train_tokens = torch.tensor(train_tokens, dtype=torch.long)
+        train_chunks = []
+        for i in range(0, len(train_tokens) - seq_len, seq_len):
+            chunk = train_tokens[i:i + seq_len + 1]
+            if len(chunk) > 1:
+                train_chunks.append({"input_ids": chunk[:-1], "labels": chunk[1:]})
+        train_loader = DataLoader(train_chunks, batch_size=batch_size, shuffle=True, collate_fn=collate)
+
+    elif dataset_name == "fineweb":
+        from torch.utils.data import IterableDataset
+        class FineWebStream(IterableDataset):
+            def __init__(self, tok, sl, max_tokens=500_000_000):
+                self.tok = tok; self.sl = sl; self.max_tokens = max_tokens
+            def __iter__(self):
+                ds = load_dataset("HuggingFaceFW/fineweb-edu", split="train",
+                                  streaming=True, trust_remote_code=True)
+                buf = []; n = 0
+                for item in ds:
+                    text = item["text"].strip()
+                    if text: buf.extend(self.tok.encode(text))
+                    while len(buf) >= self.sl + 1:
+                        c = buf[:self.sl + 1]; buf = buf[self.sl:]
+                        yield {"input_ids": torch.tensor(c[:-1], dtype=torch.long),
+                               "labels": torch.tensor(c[1:], dtype=torch.long)}
+                        n += self.sl
+                        if n >= self.max_tokens: return
+        train_ds = FineWebStream(tokenizer, seq_len)
+        train_loader = DataLoader(train_ds, batch_size=batch_size, collate_fn=collate)
+    else:
+        raise ValueError(f"Unknown dataset: {dataset_name}")
+
     return train_loader, val_loader, tokenizer
 
 
