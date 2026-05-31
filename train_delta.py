@@ -241,8 +241,21 @@ def main():
         ckpt = torch.load(args.resume, map_location=device)
         model.load_state_dict(ckpt["model"])
         optimizer.load_state_dict(ckpt["optimizer"])
-        scheduler.load_state_dict(ckpt["scheduler"])
-        scheduler.total_steps = len(train_loader) * args.epochs  # fix for extended training
+        original_epochs = ckpt.get("total_epochs", args.epochs)
+
+        if args.epochs == original_epochs:
+            # Exact resume: restore scheduler, continue seamlessly
+            scheduler.load_state_dict(ckpt["scheduler"])
+        else:
+            # Extended: keep optimizer momentum but switch to constant small lr
+            for pg in optimizer.param_groups:
+                pg["lr"] = args.lr * 0.1
+            scheduler = torch.optim.lr_scheduler.ConstantLR(
+                optimizer, factor=1.0,
+                total_iters=len(train_loader) * (args.epochs - ckpt["epoch"])
+            )
+            print(f"  Extended: {original_epochs}e → {args.epochs}e, lr fixed at {args.lr*0.1:.1e}")
+
         start_epoch = ckpt["epoch"] + 1
         metrics_history = ckpt.get("metrics", [])
         best_val_ppl = ckpt.get("best_val_ppl", float("inf"))
@@ -266,6 +279,7 @@ def main():
             "optimizer": optimizer.state_dict(),
             "scheduler": scheduler.state_dict(),
             "epoch": epoch,
+            "total_epochs": args.epochs,
             "metrics": metrics_history,
             "best_val_ppl": best_val_ppl,
         }, os.path.join(args.output_dir, f"{run_name}_resume.pt"))
