@@ -315,6 +315,8 @@ def main():
         if val_ppl < best_val_ppl:
             best_val_ppl = val_ppl
             torch.save(model.state_dict(), os.path.join(args.output_dir, f"{run_name}_best.pt"))
+        # Always save latest weights for easy eval
+        torch.save(model.state_dict(), os.path.join(args.output_dir, f"{run_name}_latest.pt"))
 
         # Save full training state for resuming
         torch.save({
