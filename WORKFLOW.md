@@ -72,6 +72,41 @@ python train_delta.py --epochs 12 --resume results/xxx_resume.pt ...
 
 ---
 
+## 为什么用 OneCycleLR（而非 cosine）
+
+OneCycleLR 在小模型/小数据集上收敛最快——一个周期内从零升到峰值再降到零，5-8 epoch 足够跑到 PPL plateau。cosine schedule 适合大模型长训练，我们的场景用 OneCycleLR 更高效。
+
+**代价：OneCycleLR 不支持灵活续训。** 一旦设定 total_steps，中间切出来放到更长曲线上会变形。代码已处理以下情况：
+
+| 续训场景 | 行为 |
+|---------|------|
+| `epochs` 相同（断点续跑） | 精确恢复 scheduler 状态，无缝继续 |
+| `epochs` 更大（扩训练） | 自动切 ConstantLR，避免 OneCycleLR 变形 |
+
+**最佳实践：初次训练直接设够 epoch，不要中途续。** 如果必须续，接受扩 epoch 时的恒定小 lr 近似。
+
+## 业界续训标准格式
+
+完整 checkpoint 应包含：
+
+```python
+torch.save({
+    "model": model.state_dict(),
+    "optimizer": optimizer.state_dict(),
+    "scheduler": scheduler.state_dict(),
+    "epoch": epoch,
+    "global_step": step_counter,
+    "rng_state": torch.get_rng_state(),       # 随机数状态
+    "best_metric": best_val,
+}, "checkpoint.pt")
+```
+
+当前代码已保存 model/optimizer/scheduler/epoch/best_val。缺少 global_step 和 rng_state（影响极小，基本不用恢复数据读取位置）。
+
+PyTorch Lightning / HuggingFace Trainer 内置了这整套逻辑。我们的手工实现已覆盖核心功能。
+
+---
+
 ## 验证集陷阱
 
 `train_delta.py` 默认 val 是 WT-2。训练时 val 和 train 不是同一个分布会导致 val 不降，checkpoint 不保存。
