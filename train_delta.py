@@ -33,13 +33,25 @@ def create_dataloaders(seq_len: int, batch_size: int, num_workers: int = 0, data
         labels = [F.pad(item["labels"], (0, max_len - item["labels"].size(0)), value=0) for item in batch]
         return {"input_ids": torch.stack(inputs), "labels": torch.stack(labels)}
 
-    # Validation: always WT-2 for consistency
-    val_dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="validation")
-    val_tokens = []
-    for item in val_dataset:
-        text = item["text"].strip()
-        if text: val_tokens.extend(tokenizer.encode(text))
-    val_tokens = torch.tensor(val_tokens, dtype=torch.long)
+    # Validation: use same distribution as training
+    if dataset_name == "fineweb":
+        ds = load_dataset("HuggingFaceFW/fineweb-edu", split="train",
+                          streaming=True)
+        val_tokens = []
+        n = 0; max_val = 5_000_000
+        for item in ds:
+            text = item["text"].strip()
+            if text: val_tokens.extend(tokenizer.encode(text))
+            n += len(text.split())
+            if n >= max_val: break
+        val_tokens = torch.tensor(val_tokens, dtype=torch.long)
+    else:
+        val_dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="validation")
+        val_tokens = []
+        for item in val_dataset:
+            text = item["text"].strip()
+            if text: val_tokens.extend(tokenizer.encode(text))
+        val_tokens = torch.tensor(val_tokens, dtype=torch.long)
     val_chunks = []
     for i in range(0, len(val_tokens) - seq_len, seq_len):
         chunk = val_tokens[i:i + seq_len + 1]
@@ -69,7 +81,7 @@ def create_dataloaders(seq_len: int, batch_size: int, num_workers: int = 0, data
                 self.tok = tok; self.sl = sl; self.max_tokens = max_tokens
             def __iter__(self):
                 ds = load_dataset("HuggingFaceFW/fineweb-edu", split="train",
-                                  streaming=True, trust_remote_code=True)
+                                  streaming=True)
                 buf = []; n = 0
                 for item in ds:
                     text = item["text"].strip()
