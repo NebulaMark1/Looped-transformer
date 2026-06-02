@@ -292,6 +292,9 @@ def main():
         if args.epochs == original_epochs:
             # Exact resume: restore scheduler, continue seamlessly
             scheduler.load_state_dict(ckpt["scheduler"])
+            # Streaming data: fix total_steps margin carried forward from old run
+            if args.dataset == "fineweb":
+                scheduler.total_steps = total_steps
         else:
             # Extended: keep optimizer momentum but switch to constant small lr
             for pg in optimizer.param_groups:
