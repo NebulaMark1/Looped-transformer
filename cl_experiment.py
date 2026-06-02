@@ -233,6 +233,9 @@ def main():
     with open(os.path.join(args.output_dir, f"{run_name}_results.json"), "w") as f:
         json.dump(out, f, indent=2)
 
+    # Save CL model for FineWeb forgetting eval
+    torch.save(model.state_dict(), os.path.join(args.output_dir, f"{run_name}_model.pt"))
+
 
 if __name__ == "__main__":
     main()
