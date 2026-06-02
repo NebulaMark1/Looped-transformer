@@ -69,6 +69,7 @@ python train_delta.py --epochs 12 --resume results/xxx_resume.pt ...
 - 验证集取 5M tokens 分片，同分布
 - 数据集路径：`HuggingFaceFW/fineweb-edu`
 - **不要加** `trust_remote_code=True`（新版 datasets 不支持）
+- **流式 total_steps 估不准**：`500M/(256×16)` 截断取整，实际 batch 数可能多 1。OneCycleLR 多一步就崩。代码已加安全余量（`steps_per_epoch // 2`），训练最后几个 batch 会快速将 lr 降到 0，不影响收敛。
 
 ---
 
