@@ -247,7 +247,10 @@ def main():
         total_steps = len(train_loader) * args.epochs
     except TypeError:
         # Streaming dataset has no len(), estimate from seq_len * batch_size
-        total_steps = (500_000_000 // (args.seq_len * args.batch_size)) * args.epochs
+        # Streaming: add margin to prevent off-by-one
+        steps_per_epoch = 500_000_000 // (args.seq_len * args.batch_size)
+        total_steps = steps_per_epoch * args.epochs
+        total_steps += steps_per_epoch // 2  # safety margin
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optimizer, max_lr=args.lr, total_steps=total_steps,
         pct_start=args.warmup_steps / total_steps,
@@ -315,8 +318,6 @@ def main():
         if val_ppl < best_val_ppl:
             best_val_ppl = val_ppl
             torch.save(model.state_dict(), os.path.join(args.output_dir, f"{run_name}_best.pt"))
-        # Always save latest weights for easy eval
-        torch.save(model.state_dict(), os.path.join(args.output_dir, f"{run_name}_latest.pt"))
 
         # Save full training state for resuming
         torch.save({
