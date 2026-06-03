@@ -8,12 +8,11 @@ Usage:
         --datasets wikitext-2 fineweb tinystories
 """
 
-import argparse, math, re
+import argparse, math, re, sys
 import torch
 import torch.nn.functional as F
 from transformers import GPT2TokenizerFast
 from datasets import load_dataset
-from tqdm import tqdm
 
 from delta_model import DeltaConfig, DeltaLoopedTransformer
 
@@ -39,7 +38,10 @@ def auto_detect(state_dict, ckpt_path):
 def eval_ppl_at_loop(model, tokens, device, early_exit_loop, seq_len=256):
     total_loss, total_tokens = 0.0, 0
     chunk_indices = list(range(0, len(tokens) - seq_len, seq_len))
-    for i in tqdm(chunk_indices, desc=f"  exit={early_exit_loop}", leave=False):
+    total = len(chunk_indices)
+    for idx, i in enumerate(chunk_indices):
+        if idx % 500 == 0:
+            print(f"  exit={early_exit_loop}: {idx}/{total}", end="\r", flush=True, file=sys.stderr)
         chunk = tokens[i:i + seq_len + 1].to(device)
         if len(chunk) < seq_len + 1:
             continue
@@ -50,6 +52,7 @@ def eval_ppl_at_loop(model, tokens, device, early_exit_loop, seq_len=256):
         targets = labels[0, :-1]
         total_loss += F.cross_entropy(logits, targets, reduction="sum").item()
         total_tokens += targets.numel()
+    print(" " * 80, end="\r", flush=True, file=sys.stderr)
     return math.exp(total_loss / total_tokens) if total_tokens > 0 else float("inf")
 
 
@@ -89,12 +92,12 @@ def main():
     state_dict = torch.load(args.checkpoint, map_location="cpu")
     dim, heads, n_layers, n_loops = auto_detect(state_dict, args.checkpoint)
 
-    print(f"Model: d={dim}, layers={n_layers}, loops={n_loops}")
-    print(f"Checkpoint: {args.checkpoint}\n")
+    print(f"Model: d={dim}, layers={n_layers}, loops={n_loops}", file=sys.stderr)
+    print(f"Checkpoint: {args.checkpoint}", file=sys.stderr)
 
     datasets_tokens = {}
     for ds_name in args.datasets:
-        print(f"Loading {ds_name}...")
+        print(f"Loading {ds_name}...", file=sys.stderr)
         datasets_tokens[ds_name] = load_dataset_tokens(
             ds_name, tokenizer, args.max_tokens)
 
@@ -104,17 +107,29 @@ def main():
     model.load_state_dict(state_dict, strict=True)
     model.eval()
 
-    print(f"\n{'Loop':>5}", end="")
+    # Collect all results first, then print table cleanly
+    results = {}
+    for loop_depth in range(n_loops):
+        results[loop_depth] = {}
+        for ds_name in args.datasets:
+            print(f"Evaluating loop={loop_depth} on {ds_name}...", file=sys.stderr)
+            results[loop_depth][ds_name] = eval_ppl_at_loop(
+                model, datasets_tokens[ds_name], device, loop_depth)
+
+    # Print clean table
+    print(file=sys.stderr)
+    col_w = 12
+    header = f"{'Loop':>6}"
     for ds_name in args.datasets:
-        print(f"  {ds_name:>14}", end="")
-    print()
+        header += f"  {ds_name:>{col_w}}"
+    print(header)
+    print("-" * len(header))
 
     for loop_depth in range(n_loops):
-        print(f"{loop_depth:>5}", end="", flush=True)
+        row = f"{loop_depth:>6}"
         for ds_name in args.datasets:
-            ppl = eval_ppl_at_loop(model, datasets_tokens[ds_name], device, loop_depth)
-            print(f"  {ppl:>14.2f}", end="", flush=True)
-        print()
+            row += f"  {results[loop_depth][ds_name]:{col_w}.2f}"
+        print(row)
 
 
 if __name__ == "__main__":
