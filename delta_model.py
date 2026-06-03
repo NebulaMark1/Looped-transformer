@@ -30,6 +30,7 @@ class DeltaConfig:
     delta_bottleneck: int | None = None  # None → embed_dim // 4
     per_loop_delta: bool = False   # separate delta block per loop?
     attn_inject_every: int = 0     # 0=never, 2=attention injection every 2nd delta step
+    delta_modulation: str | None = None  # None | "sinusoidal"
     tie_embedding: bool = True
 
 
@@ -88,6 +89,7 @@ class DeltaBlock(nn.Module):
         self.delta_type = config.delta_type
         self.per_loop = config.per_loop_delta
         self.attn_inject_every = config.attn_inject_every
+        self.delta_modulation = config.delta_modulation
         n = config.num_loops - 1  # number of delta loops
         self.n_delta = n
 
@@ -174,6 +176,11 @@ class DeltaBlock(nn.Module):
         h = self.dropout(h)
         h = self._get_linear(self.fc2, delta_idx)(h)
         delta = delta + self.dropout(h)
+
+        if self.delta_modulation == "sinusoidal":
+            n = self.n_delta
+            weight = math.sin(math.pi * (delta_idx + 1) / (n + 1))
+            delta = delta * weight
 
         return delta
 

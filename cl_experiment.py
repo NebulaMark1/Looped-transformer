@@ -42,11 +42,13 @@ def auto_detect(state_dict, ckpt_path):
     return d, heads, layers, loops, model_type
 
 
-def make_model(dim, heads, n_layers, n_loops, device, model_type="baseline"):
+def make_model(dim, heads, n_layers, n_loops, device, model_type="baseline",
+               delta_modulation=None):
     if model_type == "delta":
         from delta_model import DeltaConfig, DeltaLoopedTransformer
         cfg = DeltaConfig(max_seq_len=256, embed_dim=dim, num_heads=heads,
-                          num_layers=n_layers, num_loops=n_loops)
+                          num_layers=n_layers, num_loops=n_loops,
+                          delta_modulation=delta_modulation)
         return DeltaLoopedTransformer(cfg).to(device)
     else:
         from model import LoopedTransformerConfig, LoopedTransformer
@@ -120,6 +122,8 @@ def parse_args():
     p.add_argument("--batch_size", type=int, default=8)
     p.add_argument("--device", type=str, default="cuda")
     p.add_argument("--output_dir", type=str, default="./results")
+    p.add_argument("--delta_modulation", type=str, default=None,
+                   help="Delta modulation: None or sinusoidal")
     return p.parse_args()
 
 
@@ -134,7 +138,8 @@ def main():
     print(f"Model: {model_type}, d={dim}, layers={n_layers}, loops={n_loops}")
     print(f"Strategy: {args.strategy}")
 
-    model = make_model(dim, heads, n_layers, n_loops, device, model_type)
+    model = make_model(dim, heads, n_layers, n_loops, device, model_type,
+                       delta_modulation=args.delta_modulation)
     model.load_state_dict(state_dict, strict=True)
 
     # ── Pre-training performance ──
