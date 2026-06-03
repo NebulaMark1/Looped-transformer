@@ -235,7 +235,8 @@ class DeltaLoopedTransformer(nn.Module):
 
         self.lm_head = self.token_embedding if config.tie_embedding else nn.Linear(config.embed_dim, config.vocab_size, bias=False)
 
-    def forward(self, input_ids: torch.Tensor, labels: torch.Tensor | None = None):
+    def forward(self, input_ids: torch.Tensor, labels: torch.Tensor | None = None,
+                early_exit_loop: int | None = None):
         B, T = input_ids.shape
 
         positions = torch.arange(T, device=input_ids.device).unsqueeze(0)
@@ -243,11 +244,12 @@ class DeltaLoopedTransformer(nn.Module):
         x = self.dropout(x)
 
         for layer_idx in range(self.config.num_layers):
-            # First loop: full block
             x = self.full_blocks[layer_idx](x)
 
-            # Subsequent loops: delta correction
-            for delta_idx in range(self.config.num_loops - 1):
+            n_delta = self.config.num_loops - 1
+            if early_exit_loop is not None:
+                n_delta = min(n_delta, early_exit_loop)
+            for delta_idx in range(n_delta):
                 x = x + self.delta_blocks[layer_idx](x, delta_idx)
 
         x = self.ln_final(x)
