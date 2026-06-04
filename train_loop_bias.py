@@ -91,7 +91,9 @@ def main():
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--batch_size", type=int, default=8)
     p.add_argument("--kl_weight", type=float, default=1.0,
-                   help="Weight for KL distillation at final loop (0=off)")
+                   help="Weight for KL distillation (0=off)")
+    p.add_argument("--kl_loops", type=str, default=None,
+                   help="Comma-separated loop depths for KL (default: '3,5,N' for L=8)")
     p.add_argument("--mid_loop", type=int, default=None,
                    help="Loop depth for intermediate TS loss (default: n_loops//2)")
     p.add_argument("--mid_weight", type=float, default=0.5,
@@ -113,8 +115,14 @@ def main():
     dim, heads, n_layers, n_loops = auto_detect(state_dict, args.checkpoint)
     mid_loop = args.mid_loop if args.mid_loop is not None else n_loops // 2
 
+    if args.kl_loops:
+        kl_loops = [int(x) for x in args.kl_loops.split(",")]
+    else:
+        kl_loops = [mid_loop, n_loops - 1]
+
     print(f"Model: d={dim}, layers={n_layers}, loops={n_loops}")
-    print(f"KL weight: {args.kl_weight}, mid_loop: {mid_loop}, mid_weight: {args.mid_weight}")
+    print(f"KL weight: {args.kl_weight}, kl_loops: {kl_loops}")
+    print(f"mid_loop: {mid_loop}, mid_weight: {args.mid_weight}")
 
     # Frozen reference model: no bias
     ref_cfg = DeltaConfig(max_seq_len=256, embed_dim=dim, num_heads=heads,
@@ -218,13 +226,20 @@ def main():
 
             task_loss = (1 - args.mid_weight) * task_loss_full + args.mid_weight * task_loss_mid
 
-            # KL divergence on final-loop logits against frozen reference
+            # Multi-depth KL: anchor representation at each kl_loop
             if args.kl_weight > 0:
-                with torch.no_grad():
-                    ref_out = frozen_model(input_ids)
-                log_biased = F.log_softmax(out_full["logits"][:, :-1, :].float(), dim=-1)
-                ref_probs = F.softmax(ref_out["logits"][:, :-1, :].float(), dim=-1)
-                kl_loss = F.kl_div(log_biased, ref_probs, reduction="batchmean")
+                kl_loss = 0.0
+                for kl_loop in kl_loops:
+                    if kl_loop == n_loops - 1:
+                        biased_logits = out_full["logits"]
+                    else:
+                        biased_logits = model(input_ids, early_exit_loop=kl_loop)["logits"]
+                    with torch.no_grad():
+                        ref_logits = frozen_model(input_ids, early_exit_loop=kl_loop)["logits"]
+                    log_biased = F.log_softmax(biased_logits[:, :-1, :].float(), dim=-1)
+                    ref_probs = F.softmax(ref_logits[:, :-1, :].float(), dim=-1)
+                    kl_loss += F.kl_div(log_biased, ref_probs, reduction="batchmean")
+                kl_loss = kl_loss / len(kl_loops)
                 loss = task_loss + args.kl_weight * kl_loss
             else:
                 kl_loss = torch.tensor(0.0)
