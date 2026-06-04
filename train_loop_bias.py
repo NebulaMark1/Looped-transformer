@@ -137,6 +137,7 @@ def main():
 
     # Profile BEFORE training
     print("\n--- Before training ---")
+    model.eval()
     wt2_tokens = []
     for item in load_dataset("wikitext", "wikitext-2-raw-v1", split="validation"):
         text = item["text"].strip()
