@@ -92,6 +92,10 @@ def main():
     p.add_argument("--batch_size", type=int, default=8)
     p.add_argument("--kl_weight", type=float, default=1.0,
                    help="Weight for KL distillation at final loop (0=off)")
+    p.add_argument("--mid_loop", type=int, default=None,
+                   help="Loop depth for intermediate TS loss (default: n_loops//2)")
+    p.add_argument("--mid_weight", type=float, default=0.5,
+                   help="Weight for mid-loop CE loss (final-loop CE gets 1-mid_weight)")
     p.add_argument("--device", type=str, default="cuda")
     p.add_argument("--output_dir", type=str, default="./results")
     p.add_argument("--tag", type=str, default=None)
@@ -103,9 +107,10 @@ def main():
 
     state_dict = torch.load(args.checkpoint, map_location="cpu")
     dim, heads, n_layers, n_loops = auto_detect(state_dict, args.checkpoint)
+    mid_loop = args.mid_loop if args.mid_loop is not None else n_loops // 2
 
     print(f"Model: d={dim}, layers={n_layers}, loops={n_loops}")
-    print(f"KL weight: {args.kl_weight}")
+    print(f"KL weight: {args.kl_weight}, mid_loop: {mid_loop}, mid_weight: {args.mid_weight}")
 
     # Frozen reference model: no bias
     ref_cfg = DeltaConfig(max_seq_len=256, embed_dim=dim, num_heads=heads,
@@ -165,7 +170,7 @@ def main():
     for epoch in range(1, args.epochs + 1):
         random.shuffle(chunks)
         model.train()
-        total_task_loss, total_kl_loss = 0.0, 0.0
+        total_task_loss, total_kl_loss, total_mid_loss = 0.0, 0.0, 0.0
         pbar = tqdm(range(0, len(chunks) - args.batch_size, args.batch_size),
                      desc=f"Epoch {epoch}")
 
@@ -174,15 +179,21 @@ def main():
             input_ids = torch.stack([c[0] for c in batch_chunks]).to(device)
             labels = torch.stack([c[1] for c in batch_chunks]).to(device)
 
-            # Biased model forward
-            out = model(input_ids, labels=labels)
-            task_loss = out["loss"]
+            # Full forward (all loops): TS loss
+            out_full = model(input_ids, labels=labels)
+            task_loss_full = out_full["loss"]
+
+            # Mid-loop forward: explicit TS loss at intermediate depth
+            out_mid = model(input_ids, labels=labels, early_exit_loop=mid_loop)
+            task_loss_mid = out_mid["loss"]
+
+            task_loss = (1 - args.mid_weight) * task_loss_full + args.mid_weight * task_loss_mid
 
             # KL divergence on final-loop logits against frozen reference
             if args.kl_weight > 0:
                 with torch.no_grad():
                     ref_out = frozen_model(input_ids)
-                log_biased = F.log_softmax(out["logits"][:, :-1, :].float(), dim=-1)
+                log_biased = F.log_softmax(out_full["logits"][:, :-1, :].float(), dim=-1)
                 ref_probs = F.softmax(ref_out["logits"][:, :-1, :].float(), dim=-1)
                 kl_loss = F.kl_div(log_biased, ref_probs, reduction="batchmean")
                 loss = task_loss + args.kl_weight * kl_loss
@@ -194,10 +205,12 @@ def main():
             loss.backward()
             optimizer.step()
 
-            total_task_loss += task_loss.item()
+            total_task_loss += task_loss_full.item()
+            total_mid_loss += task_loss_mid.item()
             total_kl_loss += kl_loss.item() if args.kl_weight > 0 else 0.0
             pbar.set_postfix({
-                "ts_ppl": f"{math.exp(task_loss.item()):.1f}",
+                "ts_full": f"{math.exp(task_loss_full.item()):.1f}",
+                "ts_mid": f"{math.exp(task_loss_mid.item()):.1f}",
                 "kl": f"{kl_loss.item():.4f}",
             })
 
