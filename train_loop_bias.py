@@ -96,6 +96,10 @@ def main():
                    help="Loop depth for intermediate TS loss (default: n_loops//2)")
     p.add_argument("--mid_weight", type=float, default=0.5,
                    help="Weight for mid-loop CE loss (final-loop CE gets 1-mid_weight)")
+    p.add_argument("--unfreeze_delta", action="store_true",
+                   help="Also train delta block weights (not just bias)")
+    p.add_argument("--unfreeze_full", action="store_true",
+                   help="Also train full block weights")
     p.add_argument("--device", type=str, default="cuda")
     p.add_argument("--output_dir", type=str, default="./results")
     p.add_argument("--tag", type=str, default=None)
@@ -129,15 +133,29 @@ def main():
     model = DeltaLoopedTransformer(train_cfg).to(device)
     model.load_state_dict(state_dict, strict=False)
 
-    # Freeze everything except bias vectors
+    # Freeze everything, then selectively unfreeze
+    for param in model.parameters():
+        param.requires_grad = False
+
+    # Always train bias vectors
     for name, param in model.named_parameters():
         if "bias" in name and "delta_blocks" in name and param.dim() == 2:
             param.requires_grad = True
-        else:
-            param.requires_grad = False
 
-    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Trainable bias params: {trainable:,}")
+    if args.unfreeze_delta:
+        for name, param in model.named_parameters():
+            if "delta_blocks." in name:
+                param.requires_grad = True
+
+    if args.unfreeze_full:
+        for name, param in model.named_parameters():
+            if "full_blocks." in name:
+                param.requires_grad = True
+
+    n_bias = sum(p.numel() for n, p in model.named_parameters() if p.requires_grad and "bias" in n and "delta_blocks" in n and p.dim() == 2)
+    n_delta = sum(p.numel() for n, p in model.named_parameters() if p.requires_grad and "delta_blocks." in n and "bias" not in n)
+    n_full = sum(p.numel() for n, p in model.named_parameters() if p.requires_grad and "full_blocks." in n)
+    print(f"Trainable: bias={n_bias:,}, delta={n_delta:,}, full={n_full:,}, total={n_bias+n_delta+n_full:,}")
 
     # Profile BEFORE training
     print("\n--- Before training ---")
@@ -163,8 +181,19 @@ def main():
     chunks = make_chunks(ts_train_tokens)
     print(f"\nTraining on {len(chunks):,} TS chunks...")
 
-    optimizer = torch.optim.AdamW(
-        [p for p in model.parameters() if p.requires_grad], lr=args.lr)
+    # Optimizer with weight decay separation
+    decay, no_decay = [], []
+    for name, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+        if p.dim() < 2 or "norm" in name or "embedding" in name or "ln" in name or "bias" in name:
+            no_decay.append(p)
+        else:
+            decay.append(p)
+    optimizer = torch.optim.AdamW([
+        {"params": decay, "weight_decay": 0.1, "lr": args.lr},
+        {"params": no_decay, "weight_decay": 0.0, "lr": args.lr},
+    ], betas=(0.9, 0.95))
     import random
 
     for epoch in range(1, args.epochs + 1):
