@@ -1,13 +1,13 @@
 """
-Train per-loop bias vectors on TinyStories while preserving WT-2.
-Hypothesis: bias vectors with zero-sum constraint create a task-phase rotation
-— intermediate loops help TS, final loop returns to WT-2.
+Train per-loop bias vectors on TinyStories with KL distillation at final loop.
+Hypothesis: bias shifts intermediate loops toward TS, KL constraint pulls
+final loop back to original WT-2 behavior.
 
 Usage:
     python train_loop_bias.py --checkpoint results/delta_ffn_loop8_wt103_final_best.pt \
-        --epochs 3 --cancellation_weight 1.0
+        --epochs 3 --kl_weight 1.0
     python train_loop_bias.py --checkpoint results/delta_ffn_loop8_wt103_final_best.pt \
-        --epochs 3 --cancellation_weight 0.0  # no cancellation (ablative control)
+        --epochs 3 --kl_weight 0.0  # no KL (ablative control)
 """
 
 import argparse, json, math, os, re, sys, time
@@ -72,17 +72,7 @@ def make_chunks(tokens, seq_len=256):
     return chunks
 
 
-def compute_cancellation_loss(model):
-    """Sum of squared L2 norm of the sum of bias vectors across all delta blocks."""
-    total = 0.0
-    for block in model.delta_blocks:
-        if hasattr(block, 'bias'):
-            total += block.bias.sum(dim=0).pow(2).sum()
-    return total
-
-
 def compute_cumulative_bias_norms(model):
-    """Returns list of cumulative bias L2 norms at each loop depth."""
     n_delta = model.config.num_loops - 1
     cum_norms = []
     for k in range(n_delta):
@@ -100,8 +90,8 @@ def main():
     p.add_argument("--epochs", type=int, default=3)
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--batch_size", type=int, default=8)
-    p.add_argument("--cancellation_weight", type=float, default=1.0,
-                   help="Weight for zero-sum cancellation loss (0=off)")
+    p.add_argument("--kl_weight", type=float, default=1.0,
+                   help="Weight for KL distillation at final loop (0=off)")
     p.add_argument("--device", type=str, default="cuda")
     p.add_argument("--output_dir", type=str, default="./results")
     p.add_argument("--tag", type=str, default=None)
@@ -113,19 +103,28 @@ def main():
 
     state_dict = torch.load(args.checkpoint, map_location="cpu")
     dim, heads, n_layers, n_loops = auto_detect(state_dict, args.checkpoint)
-    n_delta = n_loops - 1
 
     print(f"Model: d={dim}, layers={n_layers}, loops={n_loops}")
-    print(f"Cancellation weight: {args.cancellation_weight}")
+    print(f"KL weight: {args.kl_weight}")
 
-    # Build model with bias enabled
-    cfg = DeltaConfig(max_seq_len=256, embed_dim=dim, num_heads=heads,
-                      num_layers=n_layers, num_loops=n_loops,
-                      delta_bias=True)
-    model = DeltaLoopedTransformer(cfg).to(device)
-    model.load_state_dict(state_dict, strict=False)  # bias keys are new
+    # Frozen reference model: no bias
+    ref_cfg = DeltaConfig(max_seq_len=256, embed_dim=dim, num_heads=heads,
+                          num_layers=n_layers, num_loops=n_loops,
+                          delta_bias=False)
+    frozen_model = DeltaLoopedTransformer(ref_cfg).to(device)
+    frozen_model.load_state_dict(state_dict, strict=True)
+    frozen_model.eval()
+    for p in frozen_model.parameters():
+        p.requires_grad = False
 
-    # Freeze everything except bias
+    # Trainable model: with bias
+    train_cfg = DeltaConfig(max_seq_len=256, embed_dim=dim, num_heads=heads,
+                            num_layers=n_layers, num_loops=n_loops,
+                            delta_bias=True)
+    model = DeltaLoopedTransformer(train_cfg).to(device)
+    model.load_state_dict(state_dict, strict=False)
+
+    # Freeze everything except bias vectors
     for name, param in model.named_parameters():
         if "bias" in name and "delta_blocks" in name and param.dim() == 2:
             param.requires_grad = True
@@ -166,7 +165,7 @@ def main():
     for epoch in range(1, args.epochs + 1):
         random.shuffle(chunks)
         model.train()
-        total_task_loss, total_cancel_loss = 0.0, 0.0
+        total_task_loss, total_kl_loss = 0.0, 0.0
         pbar = tqdm(range(0, len(chunks) - args.batch_size, args.batch_size),
                      desc=f"Epoch {epoch}")
 
@@ -175,21 +174,31 @@ def main():
             input_ids = torch.stack([c[0] for c in batch_chunks]).to(device)
             labels = torch.stack([c[1] for c in batch_chunks]).to(device)
 
+            # Biased model forward
             out = model(input_ids, labels=labels)
             task_loss = out["loss"]
-            cancel_loss = compute_cancellation_loss(model)
 
-            loss = task_loss + args.cancellation_weight * cancel_loss
+            # KL divergence on final-loop logits against frozen reference
+            if args.kl_weight > 0:
+                with torch.no_grad():
+                    ref_out = frozen_model(input_ids)
+                log_biased = F.log_softmax(out["logits"][:, :-1, :].float(), dim=-1)
+                ref_probs = F.softmax(ref_out["logits"][:, :-1, :].float(), dim=-1)
+                kl_loss = F.kl_div(log_biased, ref_probs, reduction="batchmean")
+                loss = task_loss + args.kl_weight * kl_loss
+            else:
+                kl_loss = torch.tensor(0.0)
+                loss = task_loss
 
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
 
             total_task_loss += task_loss.item()
-            total_cancel_loss += cancel_loss.item()
+            total_kl_loss += kl_loss.item() if args.kl_weight > 0 else 0.0
             pbar.set_postfix({
-                "task": f"{math.exp(task_loss.item()):.1f}",
-                "cancel": f"{cancel_loss.item():.4f}",
+                "ts_ppl": f"{math.exp(task_loss.item()):.1f}",
+                "kl": f"{kl_loss.item():.4f}",
             })
 
     # Profile AFTER training
@@ -203,7 +212,7 @@ def main():
     print(f"Cumulative bias norms: {[f'{x:.4f}' for x in compute_cumulative_bias_norms(model)]}")
 
     # Save
-    tag = f"_cw{args.cancellation_weight}"
+    tag = f"_kl{args.kl_weight}"
     if args.tag: tag += f"_{args.tag}"
     os.makedirs(args.output_dir, exist_ok=True)
     out_path = os.path.join(args.output_dir, f"loop_bias_L{n_loops}{tag}_model.pt")
