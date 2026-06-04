@@ -31,6 +31,7 @@ class DeltaConfig:
     per_loop_delta: bool = False   # separate delta block per loop?
     attn_inject_every: int = 0     # 0=never, 2=attention injection every 2nd delta step
     delta_modulation: str | None = None  # None | "sinusoidal"
+    delta_bias: bool = False       # per-loop learnable bias vector
     tie_embedding: bool = True
 
 
@@ -112,6 +113,10 @@ class DeltaBlock(nn.Module):
         self.fc2 = self._make_linear(n, bottleneck, dim)
         self.dropout = nn.Dropout(config.dropout)
 
+        self.delta_bias = config.delta_bias
+        if self.delta_bias:
+            self.bias = nn.Parameter(torch.zeros(n, dim))
+
     def _make_param(self, n, *shape):
         if self.per_loop:
             return nn.ParameterList([nn.Parameter(torch.empty(*shape)) for _ in range(n)])
@@ -181,6 +186,9 @@ class DeltaBlock(nn.Module):
             n = self.n_delta
             weight = math.sin(math.pi * (delta_idx + 1) / (n + 1))
             delta = delta * weight
+
+        if self.delta_bias:
+            delta = delta + self.bias[delta_idx]
 
         return delta
 
